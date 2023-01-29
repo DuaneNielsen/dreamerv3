@@ -8,16 +8,19 @@ from matplotlib import pyplot as plt
 
 if __name__ == '__main__':
 
-    L = 12
-    N = 10
-    C = 10
-    D = 1
-    hidden_size = 20
+    C = Env.state_classes
+    D = Env.state_size
+    AC = Env.action_classes
+    AD = Env.action_size
+
+    L = 12  #
+    N = 10  # batch_size
+    hidden_size = 32
     num_layers = 3
     device = "cpu"
 
     # setup GRU
-    gru = nn.GRU(C * D, hidden_size, num_layers).to(device)
+    gru = nn.GRU(C * D + AC * AD, hidden_size, num_layers).to(device)
     hidden_to_part = nn.Linear(hidden_size, C * D)
     opt = Adam(gru.parameters(), lr=1e-3)
 
@@ -36,12 +39,12 @@ if __name__ == '__main__':
     plt.draw()
 
     # train
-    for epoch in range(1000):
+    for epoch in range(2000):
         s, a, r, c, next_s, mask = buffer.sample_batch(L, N)
 
-        output, _ = gru(s.flatten(-2))
+        sa = torch.cat((s, a), -1)
+        output, _ = gru(sa.flatten(-2))
         output = hidden_to_part(output).unflatten(-1, (C, D))
-        output = output.softmax(2)
         loss = cross_entropy(input=output.flatten(start_dim=0, end_dim=1) * mask.reshape(N * L, 1, 1),
                              target=next_s.flatten(start_dim=0, end_dim=1))
         opt.zero_grad()
@@ -50,7 +53,7 @@ if __name__ == '__main__':
 
         # test
         with torch.no_grad():
-            output, _ = gru(s.flatten(-2))
+            output, _ = gru(sa.flatten(-2))
             output = hidden_to_part(output).unflatten(-1, (C, D))
             mse = ((output[:, :, 0].argmax() - s[:, :, 0].argmax(-1) - 1.) ** 2).std()
             transitions = []

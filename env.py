@@ -11,27 +11,30 @@ def cont(state):
 
 
 class Env:
-    left = torch.tensor([-1])
-    right = torch.tensor([1])
+    left = torch.tensor([1, 0, 0, 0, 0, 0, 0, 0, 0, 0]).unsqueeze(1)
+    right = torch.tensor([0, 0, 1, 0, 0, 0, 0, 0, 0, 0]).unsqueeze(1)
+    state_classes = 10
+    state_size = 1
+    action_classes = 10
+    action_size = 1
 
-    def __init__(self, size, reward_f, cont_f):
-        self.size = size
+    def __init__(self, reward_f, cont_f):
         self.state = torch.tensor([1], requires_grad=False)
         self.reward_f = reward_f
         self.done_f = cont_f
 
     def reset(self):
         self.state = torch.tensor([1], requires_grad=False)
-        return nf.one_hot(self.state, self.size).T.float()
+        return nf.one_hot(self.state, Env.state_classes).T.float()
 
     def step(self, action):
-        self.state += action.sign().detach()
+        self.state += action.argmax() - 1
         self.state = self.state.clamp(0, 9)
-        return nf.one_hot(self.state, self.size).T.float(), self.reward_f(self.state), self.done_f(self.state), {"state": self.state}
+        return nf.one_hot(self.state, Env.state_classes).T.float(), self.reward_f(self.state), self.done_f(self.state), {"state": self.state}
 
 
 if __name__ == "__main__":
-    env = Env(10, reward, cont)
+    env = Env(reward, cont)
 
     # test reset
     s = env.reset()
