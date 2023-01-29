@@ -11,8 +11,8 @@ def cont(state):
 
 
 class Env:
-    left = torch.tensor([1, 0, 0, 0, 0, 0, 0, 0, 0, 0]).unsqueeze(1)
-    right = torch.tensor([0, 0, 1, 0, 0, 0, 0, 0, 0, 0]).unsqueeze(1)
+    left = torch.tensor([[1, 0, 0, 0, 0, 0, 0, 0, 0, 0]])
+    right = torch.tensor([[0, 0, 1, 0, 0, 0, 0, 0, 0, 0]])
     state_classes = 10
     state_size = 1
     action_classes = 10
@@ -25,12 +25,12 @@ class Env:
 
     def reset(self):
         self.state = torch.tensor([1], requires_grad=False)
-        return nf.one_hot(self.state, Env.state_classes).T.float()
+        return nf.one_hot(self.state, Env.state_classes).float()
 
     def step(self, action):
         self.state += action.argmax() - 1
         self.state = self.state.clamp(0, 9)
-        return nf.one_hot(self.state, Env.state_classes).T.float(), self.reward_f(self.state), self.done_f(self.state), {"state": self.state}
+        return nf.one_hot(self.state, Env.state_classes).float(), self.reward_f(self.state), self.done_f(self.state), {"state": self.state}
 
 
 if __name__ == "__main__":

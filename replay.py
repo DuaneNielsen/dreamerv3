@@ -3,11 +3,11 @@ from env import Env, reward, cont
 from collections import deque
 
 offsets = {'s': 0, 'a': 1, 'r': 2, 'c': 3, 'next_s': 4, 'mask': 5}
-pads = {'s': torch.zeros(Env.state_classes, Env.state_size),
-        'a': torch.zeros(Env.action_classes, Env.action_size),
+pads = {'s': torch.zeros(Env.state_size, Env.state_classes),
+        'a': torch.zeros(Env.action_size, Env.action_classes),
         'r': torch.zeros(1),
         'c': torch.zeros(1),
-        'next_s': torch.zeros(Env.state_classes, Env.state_size)}
+        'next_s': torch.zeros(Env.state_size, Env.state_classes)}
 
 
 def trajectory_len(trj):
@@ -151,10 +151,10 @@ if __name__ == '__main__':
         assert len(replay_buffer) == 16
 
         s = trajectory_batch('s', 10, [trj, trj], [0, 0])
-        assert s.shape == (10, 2, 10, 1)
+        assert s.shape == (10, 2, 1, 10)
 
         a = trajectory_batch('a', 10, [trj, trj], [0, 0])
-        assert a.shape == (10, 2, 10, 1)
+        assert a.shape == (10, 2, 1, 10)
 
         r = trajectory_batch('r', 10, [trj, trj], [0, 0])
         assert r.shape == (10, 2, 1)
@@ -163,12 +163,12 @@ if __name__ == '__main__':
         assert c.shape == (10, 2, 1)
 
         next_s = trajectory_batch('next_s', 10, [trj, trj], [0, 0])
-        assert next_s.shape == (10, 2, 10, 1)
+        assert next_s.shape == (10, 2, 1, 10)
 
         replay_buffer = ReplayBuffer(max_trajectories=10)
         bins = torch.zeros(10, dtype=torch.int)
         for i in range(1000):
             replay_buffer += trj
             s, a, r, c, next_s, mask = replay_buffer.sample_batch(length=5, batch_size=10)
-            bins[next_s[0].argmax(-2).flatten()] += 1
+            bins[next_s[0].argmax(-1).flatten()] += 1
             print(bins)

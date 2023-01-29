@@ -44,9 +44,9 @@ if __name__ == '__main__':
 
         sa = torch.cat((s, a), -1)
         output, _ = gru(sa.flatten(-2))
-        output = hidden_to_part(output).unflatten(-1, (C, D))
-        loss = cross_entropy(input=output.flatten(start_dim=0, end_dim=1) * mask.reshape(N * L, 1, 1),
-                             target=next_s.flatten(start_dim=0, end_dim=1))
+        output = hidden_to_part(output).unflatten(-1, (D, C))
+        loss = cross_entropy(input=output.flatten(start_dim=0, end_dim=1).permute(0, 2, 1) * mask.reshape(N * L, 1, 1),
+                             target=next_s.flatten(start_dim=0, end_dim=1).permute(0, 2, 1))
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -54,17 +54,16 @@ if __name__ == '__main__':
         # test
         with torch.no_grad():
             output, _ = gru(sa.flatten(-2))
-            output = hidden_to_part(output).unflatten(-1, (C, D))
-            mse = ((output[:, :, 0].argmax() - s[:, :, 0].argmax(-1) - 1.) ** 2).std()
+            output = hidden_to_part(output).unflatten(-1, (D, C))
             transitions = []
             for l in range(L):
                 for n in range(N):
-                    s_, o = s[l, n].argmax(0).item(), output[l, n].argmax(0).item()
+                    s_, o = s[l, n, 0].argmax().item(), output[l, n, 0].argmax().item()
                     if o - s_ > 1. and mask[l, n] == 1.:
                         transitions += [f"{s_} -> {o}"]
             print(transitions)
-            t0 = s.argmax(2).flatten()
-            t1 = output.argmax(2).flatten()
+            t0 = s.argmax(-1).flatten()
+            t1 = output.argmax(-1).flatten()
             conn_matrix = torch.stack((t0, t1), dim=1)
             conn_matrix = conn_matrix[mask.flatten() == 1.]
             scatter.set_offsets(conn_matrix)
