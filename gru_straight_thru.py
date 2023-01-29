@@ -40,11 +40,11 @@ if __name__ == '__main__':
     ax.set_ylim(0, 10)
     plt.draw()
 
-    def sample_one_hot(logits, noise=0.01):
+    def sample_one_hot(logits, epsilon=0.01):
         " sample from a categorical using the straight-thru method"
         uniform = torch.ones_like(logits)
         probs = torch.softmax(logits, -1)
-        probs = (1 - noise) * probs + noise * uniform
+        probs = (1 - epsilon) * probs + epsilon * uniform
         dist = OneHotCategorical(probs=probs)
         return dist.sample() + dist.probs - dist.probs.detach()
 
