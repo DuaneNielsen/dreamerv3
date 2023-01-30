@@ -22,6 +22,8 @@ if __name__ == '__main__':
     # setup GRU
     gru = nn.GRU(C * D + AC * AD, hidden_size, num_layers).to(device)
     hidden_to_part = nn.Linear(hidden_size, C * D)
+
+    # fix this, you not passing in the hidden params!
     opt = Adam(gru.parameters(), lr=1e-3)
 
     # dataset

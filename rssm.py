@@ -1,27 +1,37 @@
 import torch
 import torch.nn as nn
-from torch.nn.functional import cross_entropy, binary_cross_entropy, kl_div
+from torch.nn.functional import kl_div, softmax
 from torch.optim import Adam
 from replay import simple_trajectory, ReplayBuffer
 from env import Env
 from matplotlib import pyplot as plt
-from torch.distributions import RelaxedOneHotCategorical
+from torch.distributions import OneHotCategorical, Normal
+
+
+
 
 if __name__ == '__main__':
-    C = Env.state_classes
+
     D = Env.state_size
-    AC = Env.action_classes
+    C = Env.state_classes
+
     AD = Env.action_size
+    AC = Env.action_classes
+
+    ZD = 1  # latent_size
+    ZC = 32  # latent classes
 
     L = 12  #
     N = 10  # batch_size
     hidden_size = 32
-    num_layers = 4
+    num_layers = 3
     device = "cpu"
 
-    # setup GRU
-    gru = nn.GRU(C * D + AC * AD, hidden_size, num_layers).to(device)
-    hidden_to_part = nn.Linear(hidden_size, C * D)
+    # setup networks
+    encoder = nn.Linear(D * C, ZD * ZC).to(device)
+    decoder = nn.Linear(ZD * ZC + hidden_size, D * C).to(device)
+    gru = nn.GRU(ZD * ZC + AD * AC, hidden_size, num_layers).to(device)
+    dynamics_predictor = nn.Linear(hidden_size, ZD * ZC).to(device)
     opt = Adam(gru.parameters(), lr=1e-3)
 
     # dataset
@@ -42,20 +52,33 @@ if __name__ == '__main__':
     for epoch in range(2000):
         s, a, r, c, next_s, mask = buffer.sample_batch(L, N)
 
-        sa = torch.cat((s, a), -1)
-        h, _ = gru(sa.flatten(-2))
-        z = hidden_to_part(h).unflatten(-1, (D, C))
-        z = RelaxedOneHotCategorical(logits=z, temperature=2.22).rsample()
-        loss = kl_div(input=z.flatten(start_dim=0, end_dim=1).permute(0, 2, 1).log() * mask.reshape(N * L, 1, 1),
-                             target=next_s.flatten(start_dim=0, end_dim=1).permute(0, 2, 1), reduction='batchmean')
+        # encoder: z ~ q ( z | h, x )
+        z_enc_logits = encoder(s.flatten(-2)).unflatten(-1, (ZD, ZC))
+        z_enc = sample_one_hot(z_enc_logits)
+
+        # gru: h =  f (h | h, z, a)
+        za = torch.cat((z_enc.flatten(-2), a.flatten(-2)), -1)
+        h, _ = gru(za)
+
+        # decoder
+        s_dec = decoder(torch.cat((z_enc.flatten(-2), h), -1)).unflatten(-1, (D, C))
+        s_dec_dist = Normal(s_dec, 1.)
+
+        # predictor
+        z_pred = dynamics_predictor(h).unflatten(-1, (ZD, ZC))
+        z_pred = sample_one_hot(logits=z_pred)
+
+        loss = - s_dec_dist.log_prob(s).mean()
+        # loss += kl_div(input=z.flatten(start_dim=0, end_dim=1).permute(0, 2, 1).log() * mask.reshape(N * L, 1, 1),
+        #               target=next_s.flatten(start_dim=0, end_dim=1).permute(0, 2, 1), reduction='batchmean')
         opt.zero_grad()
         loss.backward()
         opt.step()
 
-        # test
+        # visualize
         with torch.no_grad():
             output, _ = gru(sa.flatten(-2))
-            output = hidden_to_part(output).unflatten(-1, (D, C))
+            output = dynamics_predictor(output).unflatten(-1, (ZD, ZC))
             transitions = []
             for l in range(L):
                 for n in range(N):

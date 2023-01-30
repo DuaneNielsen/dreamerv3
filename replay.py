@@ -1,13 +1,14 @@
 import torch
 from env import Env, reward, cont
 from collections import deque
+from torch.nn.functional import one_hot
 
 offsets = {'s': 0, 'a': 1, 'r': 2, 'c': 3, 'next_s': 4, 'mask': 5}
-pads = {'s': torch.zeros(Env.state_size, Env.state_classes),
+pads = {'s': one_hot(torch.ones(Env.state_size, dtype=torch.long) * 5, Env.state_classes),
         'a': torch.zeros(Env.action_size, Env.action_classes),
         'r': torch.zeros(1),
         'c': torch.zeros(1),
-        'next_s': torch.zeros(Env.state_size, Env.state_classes)}
+        'next_s': one_hot(torch.ones(Env.state_size, dtype=torch.long) * 5, Env.state_classes)}
 
 
 def trajectory_len(trj):
