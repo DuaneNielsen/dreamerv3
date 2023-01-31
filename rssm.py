@@ -119,7 +119,7 @@ class RSSM(nn.Module):
         self.seq_model = nn.GRUCell(z_size * z_cls + a_size * a_cls, h_size)
         self.decoder = Decoder()
 
-    def forward(self, x, a, h0):
+    def forward(self, x, a, r, c, h0):
         """
 
         :param x: [T, N, x_size, x_cls]
@@ -129,14 +129,13 @@ class RSSM(nn.Module):
         """
 
         h_list = [h0]
-        e0 = self.embedder(x[0])
-        z_list = [self.encoder(h0, e0)]
+        e = self.embedder(x)
+        z_list = [self.encoder(h0, e[0])]
 
         for t in range(1, x.size(0)):
             za_flat = torch.cat([z_list[t-1].flatten(-2), a[t-1].flatten(-2)], dim=1)
             h_list += [self.seq_model(za_flat, h_list[t - 1])]
-            e_t = self.embedder(x[t])
-            z_list += [self.encoder(h_list[t], e_t)]
+            z_list += [self.encoder(h_list[t], e[t])]
 
         h = torch.stack(h_list)
         z = torch.stack(z_list)
@@ -166,7 +165,7 @@ if __name__ == '__main__':
         mask = mask.unsqueeze(-1)
 
         h0 = torch.zeros(batch_size, h_size)
-        x_dist, h, z_prior = rssm(x, a, h0)
+        x_dist, h, z_prior = rssm(x, a, r, c, h0)
         loss = - x_dist.log_prob(x) * mask
         loss = loss.mean()
         opt.zero_grad()
