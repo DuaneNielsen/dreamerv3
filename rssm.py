@@ -39,7 +39,7 @@
 └──┬────────┘     │            │  ─┤    └───┬───────┘
    │     ▲        │ Sequence   │   │        │
    ▼     │        │            │   │        ▼
- zprior ─┼───────►│ Predictor  │   │      zprior
+ zprior ─┼───────►│ Model      │   │      zprior
    │     │        │            │   │        │
    │     h0 ─────►│            │   │        │
    │     │        └────────────┘   │        │
@@ -116,7 +116,7 @@ class RSSM(nn.Module):
 
         self.embedder = nn.Flatten(-2)
         self.encoder = Encoder()
-        self.seq_pred = nn.GRUCell(z_size * z_cls + a_size * a_cls, h_size)
+        self.seq_model = nn.GRUCell(z_size * z_cls + a_size * a_cls, h_size)
         self.decoder = Decoder()
 
     def forward(self, x, a, h0):
@@ -134,7 +134,7 @@ class RSSM(nn.Module):
 
         for t in range(1, x.size(0)):
             za_flat = torch.cat([z_list[t-1].flatten(-2), a[t-1].flatten(-2)], dim=1)
-            h_list += [self.seq_pred(za_flat, h_list[t-1])]
+            h_list += [self.seq_model(za_flat, h_list[t - 1])]
             e_t = self.embedder(x[t])
             z_list += [self.encoder(h_list[t], e_t)]
 
