@@ -22,44 +22,14 @@
  During training z = zprior
  During prediction z = zpost
 
-
- Dataflow Diagram (partial)
-
-    X0               a                      X1
-    │                │                      │
-    ▼                │                      ▼
-┌──────────┐         │                  ┌──────────┐
-│ Embedder │         │                  │ Embedder │
-└──────────┘         │                  └──────────┘
-    e                │                      e
-    │                ▼                      │
-    ▼             ┌────────────┐            ▼
-┌───────────┐     │            │        ┌───────────┐
-│ Encoder   │     │            │ h1┌───►│ Encoder   │
-└──┬────────┘     │            │  ─┤    └───┬───────┘
-   │     ▲        │ Sequence   │   │        │
-   ▼     │        │            │   │        ▼
- zprior ─┼───────►│ Model      │   │      zprior
-   │     │        │            │   │        │
-   │     h0 ─────►│            │   │        │
-   │     │        └────────────┘   │        │
-   ▼     ▼                         ▼        ▼
-┌───────────┐                     ┌───────────┐
-│ Decoder   │                     │ Decoder   │
-└───┬───────┘                     └─────────┬─┘
-    │                                       │
-    ▼                                       ▼
-
-    X0                                      X1
-
 """
 
 import torch
 import torch.nn as nn
 from torch.optim import Adam
 from matplotlib import pyplot as plt
-from torch.distributions import OneHotCategorical
-from utils import sample_one_hot
+from torch.distributions import OneHotCategorical, Normal, Bernoulli
+from dists import sample_one_hot, OneHotCategoricalStraightThru
 from env import Env
 from replay import ReplayBuffer, simple_trajectory
 from collections import deque
@@ -82,7 +52,7 @@ class Encoder(nn.Module):
     def forward(self, h, e):
         he_flat = torch.cat([h, e], dim=-1)
         z_flat = self.encoder(he_flat)
-        return sample_one_hot(z_flat.unflatten(-1, (z_size, z_cls)))
+        return OneHotCategoricalStraightThru(logits=z_flat.unflatten(-1, (z_size, z_cls)))
 
 
 class Decoder(nn.Module):
@@ -99,7 +69,34 @@ class Decoder(nn.Module):
         return OneHotCategorical(logits=x_flat.unflatten(-1, (x_size, x_cls)))
 
 
-# models
+class DynamicsPredictor(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.dynamics_predictor = nn.Linear(h_size, z_size * z_cls)
+
+    def forward(self, h):
+        z_flat = self.dynamics_predictor(h)
+        return OneHotCategoricalStraightThru(logits=z_flat.unflatten(-1, (z_size, z_cls)))
+
+
+class RewardPredictor(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.reward_predictor = nn.Linear(h_size, 1)
+
+    def forward(self, h):
+        return Normal(loc=self.reward_predictor(h), scale=1.)
+
+
+class ContinuePredictor(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.continue_predictor = nn.Linear(h_size, 1)
+
+    def forward(self, h):
+        return Bernoulli(logits=self.continue_predictor(h))
+
+
 class RSSM(nn.Module):
     def __init__(self):
         super().__init__()
@@ -118,37 +115,70 @@ class RSSM(nn.Module):
         self.encoder = Encoder()
         self.seq_model = nn.GRUCell(z_size * z_cls + a_size * a_cls, h_size)
         self.decoder = Decoder()
+        self.dynamics_pred = DynamicsPredictor()
+        self.reward_pred = RewardPredictor()
+        self.continue_pred = ContinuePredictor()
 
-    def forward(self, x, a, r, c, h0):
+    def forward(self, x, a, h0):
         """
 
         :param x: [T, N, x_size, x_cls]
         :param a: [T, N, a_size, a_cls]
         :param h0: [N, h0]
         :return: x, h, z
+
+        ^                          ┌────┐
+        x0 ◄───────────────────────┤dec │
+                                   └────┘
+                                    ▲  ▲
+            ┌───┐     ┌───┐         │  │   ┌─────────┐
+        x0─►│emb├─►e─►│enc├─►zprior─┴──┼──►│Sequence │    x1─►
+            └───┘     └───┘            │   │Model    │
+                        ▲              │   │         │
+        h0──┬───────────┴──────────────┴──►│         ├───►h1─►
+            │                              │         │
+            │  ┌───┐                       │         │
+            ├─►│dyn├─►zpost                │         │
+            │  └───┘                       │         │
+            │                              │         │
+            │  ┌───┐                       │         │
+            ├─►│rew├─►reward0              │         │
+            │  └───┘                       │         │
+            │                              │         │
+            │  ┌───┐                       │         │
+            └─►│con├─►cont0                │         │
+               └───┘                       │         │
+                                           │         │
+        a0────────────────────────────────►│         │    a1─►
+                                           └─────────┘
+
         """
 
         h_list = [h0]
         e = self.embedder(x)
-        z_list = [self.encoder(h0, e[0])]
+        z_list = [self.encoder(h0, e[0]).sample()]
 
         for t in range(1, x.size(0)):
             za_flat = torch.cat([z_list[t-1].flatten(-2), a[t-1].flatten(-2)], dim=1)
             h_list += [self.seq_model(za_flat, h_list[t - 1])]
-            z_list += [self.encoder(h_list[t], e[t])]
+            z_list += [self.encoder(h_list[t], e[t]).sample()]
 
         h = torch.stack(h_list)
         z = torch.stack(z_list)
-        x_dist = self.decoder(h, z)
 
-        return x_dist, h, z
+        x_dist = self.decoder(h, z)
+        z_post = self.dynamics_pred(h).sample()
+        r_dist = self.reward_pred(h)
+        c_dist = self.reward_pred(h)
+
+        return x_dist, r_dist, c_dist, z, z_post
 
 
 if __name__ == '__main__':
 
     # visualize
     plt.ion()
-    fig, ax = plt.subplots(4)
+    fig, ax = plt.subplots(3, 4)
     loss_buff = deque(maxlen=400)
     plt.show()
 
@@ -165,8 +195,9 @@ if __name__ == '__main__':
         mask = mask.unsqueeze(-1)
 
         h0 = torch.zeros(batch_size, h_size)
-        x_dist, h, z_prior = rssm(x, a, r, c, h0)
-        loss = - x_dist.log_prob(x) * mask
+        x_dist, r_dist, c_dist, z_prior, z_post = rssm(x, a, h0)
+        loss = - x_dist.log_prob(x) - r_dist.log_prob(r) - c_dist.log_prob(c)
+        loss = loss * mask
         loss = loss.mean()
         opt.zero_grad()
         loss.backward()
@@ -176,14 +207,16 @@ if __name__ == '__main__':
 
         with torch.no_grad():
             if batch % 10 == 0:
-                [a.cla() for a in ax]
+                for r in ax:
+                    for subplot in r:
+                        subplot.clear()
                 x, x_dist = x.argmax(-1)[mask].flatten().detach().cpu(), x_dist.logits.argmax(-1)[mask].flatten().detach().cpu()
                 bins = []
                 for i in range(1, 9):
                     bins += [x_dist[x == i]]
-                ax[0].boxplot(bins)
-                ax[1].hist(x, bins=8)
-                ax[2].hist(x_dist, bins=8)
-                ax[3].plot(list(range(batch, batch + len(loss_buff))), loss_buff)
+                ax[0, 0].boxplot(bins)
+                ax[0, 1].hist(x, bins=8)
+                ax[0, 2].hist(x_dist, bins=8)
+                ax[0, 3].plot(list(range(batch, batch + len(loss_buff))), loss_buff)
                 fig.canvas.draw()
                 plt.pause(0.01)
