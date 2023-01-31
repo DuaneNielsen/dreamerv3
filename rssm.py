@@ -82,7 +82,7 @@ class Encoder(nn.Module):
     def forward(self, h, e):
         he_flat = torch.cat([h, e], dim=-1)
         z_flat = self.encoder(he_flat)
-        return z_flat.unflatten(-1, (z_size, z_cls))
+        return sample_one_hot(z_flat.unflatten(-1, (z_size, z_cls)))
 
 
 class Decoder(nn.Module):
@@ -175,11 +175,16 @@ if __name__ == '__main__':
 
         loss_buff += [loss.item()]
 
-        [a.cla() for a in ax]
-        x, x_dist = x.argmax(-1)[mask].flatten().detach().cpu(), x_dist.logits.argmax(-1)[mask].flatten().detach().cpu()
-        ax[0].scatter(x, x_dist)
-        ax[1].hist(x, bins=8)
-        ax[2].hist(x_dist, bins=8)
-        ax[3].plot(loss_buff)
-        fig.canvas.draw()
-        plt.pause(0.01)
+        with torch.no_grad():
+            if batch % 10 == 0:
+                [a.cla() for a in ax]
+                x, x_dist = x.argmax(-1)[mask].flatten().detach().cpu(), x_dist.logits.argmax(-1)[mask].flatten().detach().cpu()
+                bins = []
+                for i in range(1, 9):
+                    bins += [x_dist[x == i]]
+                ax[0].boxplot(bins)
+                ax[1].hist(x, bins=8)
+                ax[2].hist(x_dist, bins=8)
+                ax[3].plot(list(range(batch, batch + len(loss_buff))), loss_buff)
+                fig.canvas.draw()
+                plt.pause(0.01)
