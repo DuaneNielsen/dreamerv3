@@ -1,128 +1,159 @@
+"""
+ RSSM equations
+
+ Sequence Model:       h = f( h, z, a )
+ Encoder:              z ~ q( z | h, x)
+ Dynamics predictor:   z ~ p( z | h )
+ Reward   predictor:   r ~ p( z | h )
+ Continue predictor:   c ~ p( z | h )
+ Decoder:              x ~ p( x | h, z )
+
+
+ lets refactor to ...
+
+ Sequence Model:       h = f( h, z, a )
+ Embedder:             e = q( x )
+ Encoder:              zprior ~ q ( zprior | h, e )
+ Dynamics predictor    zpost ~ p ( zpost | h )
+ Reward predictor:     r ~ p( z | h )
+ Continue predictor:   c ~ p( z | h )
+ Decoder:              x ~ p( x | h, z )
+
+ During training z = zprior
+ During prediction z = zpost
+
+
+ Dataflow Diagram (partial)
+
+    X0               a                      X1
+    │                │                      │
+    ▼                │                      ▼
+┌──────────┐         │                  ┌──────────┐
+│ Embedder │         │                  │ Embedder │
+└──────────┘         │                  └──────────┘
+    e                │                      e
+    │                ▼                      │
+    ▼             ┌────────────┐            ▼
+┌───────────┐     │            │        ┌───────────┐
+│ Encoder   │     │            │ h1┌───►│ Encoder   │
+└──┬────────┘     │            │  ─┤    └───┬───────┘
+   │     ▲        │ Sequence   │   │        │
+   ▼     │        │            │   │        ▼
+ zprior ─┼───────►│ Predictor  │   │      zprior
+   │     │        │            │   │        │
+   │     h0 ─────►│            │   │        │
+   │     │        └────────────┘   │        │
+   ▼     ▼                         ▼        ▼
+┌───────────┐                     ┌───────────┐
+│ Decoder   │                     │ Decoder   │
+└───┬───────┘                     └─────────┬─┘
+    │                                       │
+    ▼                                       ▼
+
+    X0                                      X1
+
+"""
+
 import torch
 import torch.nn as nn
-from torch.optim import Adam
-from replay import simple_trajectory, ReplayBuffer
-from env import Env
 from matplotlib import pyplot as plt
 from torch.distributions import OneHotCategorical
-from utils import sample_one_hot, sample_one_hot_log
-from tqdm import tqdm
-from collections import deque
+from utils import sample_one_hot
+from env import Env
+from replay import ReplayBuffer, simple_trajectory
+
+
+x_size, x_cls = 1, 10  # input image dims
+e_size = 10  # size of flattened embedding
+z_size, z_cls = 1, 10  # size of latent space
+h_size = 32  # size of hidden space
+a_size, a_cls = 1, 10  # action space size and classes (discrete)
+batch_size = 64
+T = 8
+
+
+class Encoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.encoder = nn.Linear(h_size + e_size, z_size * z_cls)
+
+    def forward(self, h, e):
+        he_flat = torch.cat([h, e], dim=-1)
+        z_flat = self.encoder(he_flat)
+        return z_flat.unflatten(-1, (z_size, z_cls))
+
+
+class Decoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.decoder = nn.Linear(h_size + z_size * z_cls, x_size * x_cls)
+
+    def forward(self, h, z):
+        """
+        Decoder:              x ~ p( x | h, z )
+        """
+        hz_flat = torch.cat([h, z.flatten(-2)], dim=-1)
+        x_flat = self.decoder(hz_flat)
+        return x_flat.unflatten(-1, (x_size, x_cls))
+
+
+# models
+class RSSM(nn.Module):
+    def __init__(self):
+        super().__init__()
+        """
+         Sequence Model:       h = f( h, z, a )
+         Embedder:             e = q( x )
+         Encoder:              zprior ~ q ( zprior | h, e )
+         Dynamics predictor    zpost ~ p ( zpost | h )
+         Reward predictor:     r ~ p( z | h )
+         Continue predictor:   c ~ p( z | h )
+         Decoder:              x ~ p( x | h, z )
+        
+        """
+
+        self.embedder = nn.Flatten(-2)
+        self.encoder = Encoder()
+        self.seq_pred = nn.GRUCell(z_size * z_cls + a_size * a_cls, h_size)
+        self.decoder = Decoder()
+
+    def forward(self, x, a, h0):
+        """
+
+        :param x: [T, N, x_size, x_cls]
+        :param a: [T, N, a_size, a_cls]
+        :param h0: [N, h0]
+        :return: x, h, z
+        """
+
+        h_list = [h0]
+        e0 = self.embedder(x[0])
+        z_prior_list = [self.encoder(h0, e0)]
+
+        for t in range(1, x.size(0)-1):
+            za_flat = torch.cat([z_prior_list[t-1].flatten(-2), a[t-1].flatten(-2)], dim=1)
+            h_list += [self.seq_pred(za_flat, h_list[t-1])]
+            e_t = self.embedder(x[t])
+            z_prior_list += [self.encoder(h_list[t], e_t)]
+
+        h = torch.stack(h_list)
+        z_prior = torch.stack(z_prior_list)
+        x_ = self.decoder(h, z_prior)
+
+        return x_, h, z_prior
 
 
 if __name__ == '__main__':
 
-    XD = Env.state_size
-    XC = Env.state_classes
-    AD = Env.action_size
-    AC = Env.action_classes
-    ZD = 1  # latent_size
-    ZC = 10  # latent classes
-
-    T = 12  # Time Horizon
-    N = 128  # batch_size
-    H = 32  # Gru recurrent units - a.k.a. "hidden size"
-    num_layers = 3
-    device = "cpu"
-
-    class Encoder(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.encoder = nn.Linear(H + XD * XC, ZD * ZC)
-
-        def forward(self, h, x):
-            hx_flat = torch.cat([h, x.flatten(-2)], dim=1)
-            return self.encoder(hx_flat).unflatten(-1, (ZD, ZC))
-
-    class Decoder(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.decoder = nn.Linear(H + ZD * ZC, XD * XC)
-
-        def forward(self, h, z):
-            hz = torch.cat([h, z.flatten(-2)], dim=2)
-            x_decoded_flat = self.decoder(hz)
-            x_decoded = x_decoded_flat.unflatten(-1, (XD, XC))
-            return OneHotCategorical(logits=x_decoded)
-
-    class RSSM(nn.Module):
-
-        def __init__(self):
-            super().__init__()
-            # encoder: z ~ q ( z | h, x )
-            self.encoder = Encoder()
-
-            # sequence model: h = f ( h, z, a )
-            self.gru = nn.GRUCell(ZD * ZC + AD * AC, H)
-
-            # decoder: x ~ p ( x | h, z )
-            self.decoder = Decoder()
-
-        def forward(self, x, h0):
-            """
-
-            :param x: [T, N, XD, XC] state tensor
-            :param h0: [N, H] start state tensor
-            :return: x_decoded: prediction of next state
-            """
-            # recurrent encoding
-            h_list = [h0]
-            embed_list = [self.encoder(h_list[0], x[0])]
-            z_list = [sample_one_hot(embed_list[0])]
-
-            for i in range(0, x.size(0) - 1):
-                za_flat = torch.cat([z_list[i].flatten(-2), a[i].flatten(-2)], dim=-1)
-                h_list += [self.gru(za_flat, h_list[i])]
-                embed_list += [self.encoder(h_list[i], x[i])]
-                z_list += [sample_one_hot(embed_list[i])]
-
-            h = torch.stack(h_list)
-            embed = torch.stack(embed_list)
-            z = torch.stack(z_list)
-
-            # decode
-            x_dist = self.decoder(h, embed)
-            return x_dist, z, h
-
+    # dataset
+    buff = ReplayBuffer()
+    buff += simple_trajectory([Env.right] * 8)
+    buff += simple_trajectory([Env.left])
 
     rssm = RSSM()
 
-    # optimizer
-    opt = Adam(rssm.parameters(), lr=1e-3)
+    for batch in range(5000):
+        x, a, r, c, next_x, mask = buff.sample_batch(T, batch_size)
+        h0 = torch.zeros(batch_size, h_size)
+        x_, h, z_prior = rssm(x, a, h0)
 
-    # dataset
-    buffer = ReplayBuffer()
-    for i in range(100):
-        buffer += simple_trajectory([Env.right] * 8)
-        buffer += simple_trajectory([Env.left])
-
-    # visualize
-    plt.ion()
-    fig, ax = plt.subplots(6)
-    scatter = ax[0].scatter([0, 10], [0, 10])
-    loss_hist = deque(maxlen=200)
-
-    for batch in tqdm(range(5000)):
-        x, a, r, c, next_x, mask = buffer.sample_batch(T, N)
-        h0 = torch.zeros(N, H)
-        x_dist, z, h = rssm(x, h0)
-        loss = - x_dist.log_prob(x) * mask.unsqueeze(-1)
-        loss = loss.mean()
-        opt.zero_grad()
-        loss.backward()
-        opt.step()
-
-        # visualize
-        loss_hist.append(loss.item())
-
-        if batch % 10 == 0:
-            x_argmax, x_dist_argmax = x.argmax(-1).flatten(), x_dist.probs.argmax(-1).flatten()
-            [ax[i].cla() for i in range(6)]
-            ax[0].scatter(x_argmax[mask.flatten()], x_dist_argmax[mask.flatten()])
-            ax[1].hist(x_argmax[mask.flatten()], bins=8)
-            ax[2].hist(x_dist_argmax[mask.flatten()], bins=8)
-            ax[3].hist(z.argmax(-1).flatten()[mask.flatten()], bins=10)
-            ax[4].hist(h.detach().flatten(), bins=10)
-            ax[5].plot(loss_hist)
-            fig.canvas.draw()
-            fig.canvas.flush_events()
