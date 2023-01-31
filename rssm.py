@@ -56,11 +56,13 @@
 
 import torch
 import torch.nn as nn
+from torch.optim import Adam
 from matplotlib import pyplot as plt
 from torch.distributions import OneHotCategorical
 from utils import sample_one_hot
 from env import Env
 from replay import ReplayBuffer, simple_trajectory
+from collections import deque
 
 
 x_size, x_cls = 1, 10  # input image dims
@@ -94,7 +96,7 @@ class Decoder(nn.Module):
         """
         hz_flat = torch.cat([h, z.flatten(-2)], dim=-1)
         x_flat = self.decoder(hz_flat)
-        return x_flat.unflatten(-1, (x_size, x_cls))
+        return OneHotCategorical(logits=x_flat.unflatten(-1, (x_size, x_cls)))
 
 
 # models
@@ -128,22 +130,28 @@ class RSSM(nn.Module):
 
         h_list = [h0]
         e0 = self.embedder(x[0])
-        z_prior_list = [self.encoder(h0, e0)]
+        z_list = [self.encoder(h0, e0)]
 
-        for t in range(1, x.size(0)-1):
-            za_flat = torch.cat([z_prior_list[t-1].flatten(-2), a[t-1].flatten(-2)], dim=1)
+        for t in range(1, x.size(0)):
+            za_flat = torch.cat([z_list[t-1].flatten(-2), a[t-1].flatten(-2)], dim=1)
             h_list += [self.seq_pred(za_flat, h_list[t-1])]
             e_t = self.embedder(x[t])
-            z_prior_list += [self.encoder(h_list[t], e_t)]
+            z_list += [self.encoder(h_list[t], e_t)]
 
         h = torch.stack(h_list)
-        z_prior = torch.stack(z_prior_list)
-        x_ = self.decoder(h, z_prior)
+        z = torch.stack(z_list)
+        x_dist = self.decoder(h, z)
 
-        return x_, h, z_prior
+        return x_dist, h, z
 
 
 if __name__ == '__main__':
+
+    # visualize
+    plt.ion()
+    fig, ax = plt.subplots(4)
+    loss_buff = deque(maxlen=400)
+    plt.show()
 
     # dataset
     buff = ReplayBuffer()
@@ -151,9 +159,27 @@ if __name__ == '__main__':
     buff += simple_trajectory([Env.left])
 
     rssm = RSSM()
+    opt = Adam(rssm.parameters(), lr=1e-3)
 
     for batch in range(5000):
         x, a, r, c, next_x, mask = buff.sample_batch(T, batch_size)
-        h0 = torch.zeros(batch_size, h_size)
-        x_, h, z_prior = rssm(x, a, h0)
+        mask = mask.unsqueeze(-1)
 
+        h0 = torch.zeros(batch_size, h_size)
+        x_dist, h, z_prior = rssm(x, a, h0)
+        loss = - x_dist.log_prob(x) * mask
+        loss = loss.mean()
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+
+        loss_buff += [loss.item()]
+
+        [a.cla() for a in ax]
+        x, x_dist = x.argmax(-1)[mask].flatten().detach().cpu(), x_dist.logits.argmax(-1)[mask].flatten().detach().cpu()
+        ax[0].scatter(x, x_dist)
+        ax[1].hist(x, bins=8)
+        ax[2].hist(x_dist, bins=8)
+        ax[3].plot(loss_buff)
+        fig.canvas.draw()
+        plt.pause(0.01)
