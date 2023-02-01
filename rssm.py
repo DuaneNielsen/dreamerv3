@@ -82,7 +82,7 @@ class DynamicsPredictor(nn.Module):
 class RewardPredictor(nn.Module):
     def __init__(self):
         super().__init__()
-        self.reward_predictor = nn.Linear(h_size, 1)
+        self.reward_predictor = nn.Linear(h_size, 1, bias=False)
 
     def forward(self, h):
         return Normal(loc=self.reward_predictor(h), scale=1.)
@@ -169,7 +169,7 @@ class RSSM(nn.Module):
         x_dist = self.decoder(h, z)
         z_post = self.dynamics_pred(h).sample()
         r_dist = self.reward_pred(h)
-        c_dist = self.reward_pred(h)
+        c_dist = self.continue_pred(h)
 
         return x_dist, r_dist, c_dist, z, z_post
 
@@ -179,7 +179,8 @@ if __name__ == '__main__':
     # visualize
     plt.ion()
     fig, ax = plt.subplots(3, 4)
-    loss_buff = deque(maxlen=400)
+    loss_buff, loss_x_buff, loss_r_buff, loss_c_buff = \
+        deque(maxlen=400), deque(maxlen=400), deque(maxlen=400), deque(maxlen=400)
     plt.show()
 
     # dataset
@@ -196,27 +197,57 @@ if __name__ == '__main__':
 
         h0 = torch.zeros(batch_size, h_size)
         x_dist, r_dist, c_dist, z_prior, z_post = rssm(x, a, h0)
-        loss = - x_dist.log_prob(x) - r_dist.log_prob(r) - c_dist.log_prob(c)
-        loss = loss * mask
-        loss = loss.mean()
+        loss_x = - x_dist.log_prob(x) * mask
+        loss_r = - r_dist.log_prob(r) * mask
+        loss_c = - c_dist.log_prob(c) * mask
+        loss = (loss_x + loss_r + loss_c).mean()
         opt.zero_grad()
         loss.backward()
         opt.step()
 
         loss_buff += [loss.item()]
+        loss_x_buff += [loss_x.mean().item()]
+        loss_r_buff += [loss_r.mean().item()]
+        loss_c_buff += [loss_c.mean().item()]
 
         with torch.no_grad():
             if batch % 10 == 0:
-                for r in ax:
-                    for subplot in r:
+                for row in ax:
+                    for subplot in row:
                         subplot.clear()
-                x, x_dist = x.argmax(-1)[mask].flatten().detach().cpu(), x_dist.logits.argmax(-1)[mask].flatten().detach().cpu()
+
+                # x predictor
+                x, x_est = x.argmax(-1)[mask].flatten().detach().cpu(), x_dist.logits.argmax(-1)[mask].flatten().detach().cpu()
                 bins = []
                 for i in range(1, 9):
-                    bins += [x_dist[x == i]]
+                    bins += [x_est[x == i]]
                 ax[0, 0].boxplot(bins)
                 ax[0, 1].hist(x, bins=8)
-                ax[0, 2].hist(x_dist, bins=8)
+                ax[0, 2].hist(x_est, bins=8)
                 ax[0, 3].plot(list(range(batch, batch + len(loss_buff))), loss_buff)
+                ax[0, 3].plot(list(range(batch, batch + len(loss_x_buff))), loss_x_buff)
+
+                # r predictor
+                r, r_est = r[mask].flatten(), r_dist.mean[mask].flatten()
+                bins = []
+                for i in [0.0, 1.0]:
+                    bins += [r_est[r == i]]
+                ax[1, 0].boxplot(bins)
+                ax[1, 1].hist(r)
+                ax[1, 2].hist(r_est)
+                ax[1, 3].plot(list(range(batch, batch + len(loss_buff))), loss_buff)
+                ax[1, 3].plot(list(range(batch, batch + len(loss_r_buff))), loss_r_buff)
+
+                # r predictor
+                c, c_est = c[mask].flatten(), c_dist.probs[mask].flatten()
+                bins = []
+                for i in [0.0, 1.0]:
+                    bins += [c_est[c == i]]
+                ax[2, 0].boxplot(bins)
+                ax[2, 1].hist(c)
+                ax[2, 2].hist(c_est)
+                ax[2, 3].plot(list(range(batch, batch + len(loss_buff))), loss_buff)
+                ax[2, 3].plot(list(range(batch, batch + len(loss_c_buff))), loss_c_buff)
+
                 fig.canvas.draw()
                 plt.pause(0.01)
