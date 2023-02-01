@@ -6,8 +6,8 @@ def reward(state):
     return (state == 9) * 1.
 
 
-def cont(state):
-    return (0. < state < 9.) * 1.
+def done(state):
+    return state == 9
 
 
 class Env:
@@ -18,7 +18,10 @@ class Env:
     action_classes = 10
     action_size = 1
 
-    def __init__(self, reward_f, cont_f):
+    pad_state = nf.one_hot(torch.tensor([0]).long(), state_classes).float()
+    pad_action = left
+
+    def __init__(self, reward_f=reward, cont_f=done):
         self.state = torch.tensor([1], requires_grad=False)
         self.reward_f = reward_f
         self.done_f = cont_f
@@ -34,7 +37,7 @@ class Env:
 
 
 if __name__ == "__main__":
-    env = Env(reward, cont)
+    env = Env(reward, done)
 
     # test reset
     s = env.reset()
