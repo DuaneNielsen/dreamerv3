@@ -204,7 +204,34 @@ class RSSM(nn.Module):
         Runs a batched step on the environment
         :param a: [N, a_size, a_cls ]
         :return: x, r, c : observation, reward, continue
+
+
+        ^                          ┌────┐
+        x0 ◄───────────────────────┤dec │
+                                   └────┘
+                                    ▲  ▲
+                                    │  │   ┌─────────┐
+                                    │  │   │Sequence │    
+                                    │  │   │Model    │
+                                    │  │   │         │
+        h0──┬───────────────────────┼──┴──►│         ├───►h1─►
+            │                       │      │         │
+            │  ┌───┐                │      │         │
+            ├─►│dyn├─►zpost ────────┴────► │         │
+            │  └───┘                       │         │
+            │                              │         │
+            │  ┌───┐                       │         │
+            ├─►│rew├─►reward0              │         │
+            │  └───┘                       │         │
+            │                              │         │
+            │  ┌───┐                       │         │
+            └─►│con├─►cont0                │         │
+               └───┘                       │         │
+                                           │         │
+        a0────────────────────────────────►│         │    a1─►
+                                           └─────────┘
         """
+
         self.h = self.seq_model(self.z, a, self.h)
         self.z = OneHotCategorical(logits=self.dynamics_pred(self.h)).sample()
         x_ = self.decoder(self.h, self.z).sample()
