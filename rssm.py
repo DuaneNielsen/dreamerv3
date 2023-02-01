@@ -28,8 +28,8 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 from matplotlib import pyplot as plt
-from torch.distributions import OneHotCategorical, Normal, Bernoulli
-from dists import sample_one_hot, OneHotCategoricalStraightThru
+from torch.distributions import OneHotCategorical, Normal, Bernoulli, kl_divergence
+from dists import OneHotCategoricalStraightThru
 from env import Env
 from replay import ReplayBuffer, simple_trajectory
 from collections import deque
@@ -53,7 +53,7 @@ class Encoder(nn.Module):
     def forward(self, h, e):
         he_flat = torch.cat([h, e], dim=-1)
         z_flat = self.encoder(he_flat)
-        return OneHotCategoricalStraightThru(logits=z_flat.unflatten(-1, (z_size, z_cls)))
+        return z_flat.unflatten(-1, (z_size, z_cls))
 
 
 class Decoder(nn.Module):
@@ -77,7 +77,7 @@ class DynamicsPredictor(nn.Module):
 
     def forward(self, h):
         z_flat = self.dynamics_predictor(h)
-        return OneHotCategoricalStraightThru(logits=z_flat.unflatten(-1, (z_size, z_cls)))
+        return z_flat.unflatten(-1, (z_size, z_cls))
 
 
 class RewardPredictor(nn.Module):
@@ -157,31 +157,34 @@ class RSSM(nn.Module):
 
         h_list = [h0]
         e = self.embedder(x)
-        z_list = [self.encoder(h0, e[0]).sample()]
+        z_logit_list = [self.encoder(h0, e[0])]
+        z_list = [OneHotCategoricalStraightThru(logits=z_logit_list[0]).sample()]
 
         for t in range(1, x.size(0)):
             za_flat = torch.cat([z_list[t-1].flatten(-2), a[t-1].flatten(-2)], dim=1)
             h_list += [self.seq_model(za_flat, h_list[t - 1])]
-            z_list += [self.encoder(h_list[t], e[t]).sample()]
+            z_logit_list += [self.encoder(h_list[t], e[t])]
+            z_list += [OneHotCategoricalStraightThru(logits=z_logit_list[t]).sample()]
 
         h = torch.stack(h_list)
+        z_prior_logits = torch.stack(z_logit_list)
         z = torch.stack(z_list)
 
         x_dist = self.decoder(h, z)
-        z_post = self.dynamics_pred(h).sample()
+        z_post_logits = self.dynamics_pred(h)
         r_dist = self.reward_pred(h)
         c_dist = self.continue_pred(h)
 
-        return x_dist, r_dist, c_dist, z, z_post
+        return x_dist, r_dist, c_dist, z_prior_logits, z_post_logits
 
 
 if __name__ == '__main__':
 
     # visualize
     plt.ion()
-    fig, ax = plt.subplots(3, 4)
-    loss_buff, loss_x_buff, loss_r_buff, loss_c_buff = \
-        deque(maxlen=400), deque(maxlen=400), deque(maxlen=400), deque(maxlen=400)
+    fig, ax = plt.subplots(4, 4)
+    loss_buff, loss_x_buff, loss_r_buff, loss_c_buff, loss_dyn_buff, loss_rep_buff = \
+        deque(maxlen=400), deque(maxlen=400), deque(maxlen=400), deque(maxlen=400), deque(maxlen=400), deque(maxlen=400)
     plt.show()
 
     # dataset
@@ -201,7 +204,9 @@ if __name__ == '__main__':
         loss_x = - x_dist.log_prob(x) * mask
         loss_r = - r_dist.log_prob(symlog(r)) * mask
         loss_c = - c_dist.log_prob(c) * mask
-        loss = (loss_x + loss_r + loss_c).mean()
+        loss_dyn = kl_divergence(OneHotCategorical(logits=z_prior.detach()), OneHotCategorical(logits=z_post)) * mask
+        loss_rep = kl_divergence(OneHotCategorical(logits=z_prior), OneHotCategorical(logits=z_post.detach())) * mask
+        loss = (loss_x + loss_r + loss_c + 0.5 * loss_dyn + 0.1 * loss_rep).mean()
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -210,9 +215,12 @@ if __name__ == '__main__':
         loss_x_buff += [loss_x.mean().item()]
         loss_r_buff += [loss_r.mean().item()]
         loss_c_buff += [loss_c.mean().item()]
+        loss_dyn_buff += [loss_dyn.mean().item() * 0.5]
+        loss_rep_buff += [loss_rep.mean().item() * 0.1]
 
+        # visualize training
         with torch.no_grad():
-            if batch % 10 == 0:
+            if batch % 50 == 0:
                 for row in ax:
                     for subplot in row:
                         subplot.clear()
@@ -234,21 +242,34 @@ if __name__ == '__main__':
                 for i in [0.0, 1.0]:
                     bins += [r_est[r == i]]
                 ax[1, 0].boxplot(bins)
-                ax[1, 1].hist(r)
-                ax[1, 2].hist(r_est)
+                ax[1, 1].hist(r, bins=2)
+                ax[1, 2].hist(r_est, bins=2)
                 ax[1, 3].plot(list(range(batch, batch + len(loss_buff))), loss_buff)
                 ax[1, 3].plot(list(range(batch, batch + len(loss_r_buff))), loss_r_buff)
 
-                # r predictor
+                # c predictor
                 c, c_est = c[mask].flatten(), c_dist.probs[mask].flatten()
                 bins = []
                 for i in [0.0, 1.0]:
                     bins += [c_est[c == i]]
                 ax[2, 0].boxplot(bins)
-                ax[2, 1].hist(c)
-                ax[2, 2].hist(c_est)
+                ax[2, 1].hist(c, bins=2)
+                ax[2, 2].hist(c_est, bins=2)
                 ax[2, 3].plot(list(range(batch, batch + len(loss_buff))), loss_buff)
                 ax[2, 3].plot(list(range(batch, batch + len(loss_c_buff))), loss_c_buff)
+
+                # r predictor
+                z_prior_prob = torch.argmax(z_prior, -1)[mask].flatten()
+                z_post_prob = torch.argmax(z_post, -1)[mask].flatten()
+                joint_hist = torch.zeros((10, 10))
+                for prior, post in zip(z_prior_prob, z_post_prob):
+                    joint_hist[prior.item(), post.item()] += 1
+                ax[3, 0].imshow(joint_hist)
+                ax[3, 1].hist(z_prior_prob, bins=10)
+                ax[3, 2].hist(z_post_prob, bins=10)
+                ax[3, 3].plot(list(range(batch, batch + len(loss_buff))), loss_buff)
+                ax[3, 3].plot(list(range(batch, batch + len(loss_dyn_buff))), loss_dyn_buff)
+                ax[3, 3].plot(list(range(batch, batch + len(loss_rep_buff))), loss_rep_buff)
 
                 fig.canvas.draw()
                 plt.pause(0.01)
