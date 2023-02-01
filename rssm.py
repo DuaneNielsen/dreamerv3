@@ -97,6 +97,16 @@ class ContinuePredictor(nn.Module):
         return Bernoulli(logits=self.continue_predictor(h))
 
 
+class SequenceModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.seq_model = nn.GRUCell(z_size * z_cls + a_size * a_cls, h_size)
+
+    def forward(self, z, a, h):
+        za_flat = torch.cat([z.flatten(-2), a.flatten(-2)], dim=1)
+        return self.seq_model(za_flat, h)
+
+
 class RSSM(nn.Module):
     def __init__(self):
         super().__init__()
@@ -113,11 +123,15 @@ class RSSM(nn.Module):
 
         self.embedder = nn.Flatten(-2)
         self.encoder = Encoder()
-        self.seq_model = nn.GRUCell(z_size * z_cls + a_size * a_cls, h_size)
+        self.seq_model = SequenceModel()
         self.decoder = Decoder()
         self.dynamics_pred = DynamicsPredictor()
         self.reward_pred = RewardPredictor()
         self.continue_pred = ContinuePredictor()
+
+        # prediction state
+        self.h = None
+        self.z = None
 
     def forward(self, x, a, h0):
         """
@@ -160,8 +174,7 @@ class RSSM(nn.Module):
         z_list = [OneHotCategoricalStraightThru(logits=z_logit_list[0]).sample()]
 
         for t in range(1, x.size(0)):
-            za_flat = torch.cat([z_list[t - 1].flatten(-2), a[t - 1].flatten(-2)], dim=1)
-            h_list += [self.seq_model(za_flat, h_list[t - 1])]
+            h_list += [self.seq_model(z_list[t - 1], a[t - 1], h_list[t - 1])]
             z_logit_list += [self.encoder(h_list[t], e[t])]
             z_list += [OneHotCategoricalStraightThru(logits=z_logit_list[t]).sample()]
 
@@ -175,6 +188,13 @@ class RSSM(nn.Module):
         c_dist = self.continue_pred(h)
 
         return x_dist, r_dist, c_dist, z_prior_logits, z_post_logits
+
+    def reset(self, h0=None):
+        self.h = h0 if h0 is not None else torch.zeros(h_size)
+        self.z = OneHotCategorical(logits=self.dynamics_pred(self.h)).sample()
+
+    def step(self, a):
+        self.seq_model()
 
 
 if __name__ == '__main__':
