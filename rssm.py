@@ -189,12 +189,27 @@ class RSSM(nn.Module):
 
         return x_dist, r_dist, c_dist, z_prior_logits, z_post_logits
 
-    def reset(self, h0=None):
-        self.h = h0 if h0 is not None else torch.zeros(h_size)
+    def reset(self, N=1, h0=None):
+        """
+        Reset the environment to start state
+        :param N : batch size for simulation, default 1, ignored if h0 is used
+        :param h0: [N, h_size ] : hidden variable to initialize environment, zero if None
+        """
+        self.h = h0 if h0 is not None else torch.zeros(N, h_size)
         self.z = OneHotCategorical(logits=self.dynamics_pred(self.h)).sample()
 
     def step(self, a):
-        self.seq_model()
+        """
+        Runs a batched step on the environment
+        :param a: [N, a_size, a_cls ]
+        :return: x, r, c : observation, reward, continue
+        """
+        self.h = self.seq_model(self.z, a, self.h)
+        self.z = OneHotCategorical(logits=self.dynamics_pred(self.h)).sample()
+        x_ = self.decoder(self.h, self.z).sample()
+        r_ = self.reward_pred(self.h).sample()
+        c_ = self.continue_pred(self.h).sample()
+        return x_, r_, c_
 
 
 if __name__ == '__main__':
@@ -299,5 +314,18 @@ if __name__ == '__main__':
                 ax[3, 3].plot(list(range(batch, batch + len(loss_dyn_buff))), loss_dyn_buff)
                 ax[3, 3].plot(list(range(batch, batch + len(loss_rep_buff))), loss_rep_buff)
 
+                # run the policies on the model
+
+                go_right = [Env.right] * 8
+
+                rssm.reset()
+                for a in go_right:
+                    x_, r_, c_ = rssm.step(a.unsqueeze(0))
+
+                go_left = [Env.left]
+                for a in go_left:
+                    x_, r_, c_ = rssm.step(a.unsqueeze(0))
+
                 fig.canvas.draw()
                 plt.pause(0.01)
+
