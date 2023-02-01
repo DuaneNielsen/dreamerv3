@@ -35,7 +35,6 @@ from replay import ReplayBuffer, simple_trajectory
 from collections import deque
 from symlog import symlog, symexp
 
-
 x_size, x_cls = 1, 10  # input image dims
 e_size = 10  # size of flattened embedding
 z_size, z_cls = 1, 10  # size of latent space
@@ -161,7 +160,7 @@ class RSSM(nn.Module):
         z_list = [OneHotCategoricalStraightThru(logits=z_logit_list[0]).sample()]
 
         for t in range(1, x.size(0)):
-            za_flat = torch.cat([z_list[t-1].flatten(-2), a[t-1].flatten(-2)], dim=1)
+            za_flat = torch.cat([z_list[t - 1].flatten(-2), a[t - 1].flatten(-2)], dim=1)
             h_list += [self.seq_model(za_flat, h_list[t - 1])]
             z_logit_list += [self.encoder(h_list[t], e[t])]
             z_list += [OneHotCategoricalStraightThru(logits=z_logit_list[t]).sample()]
@@ -201,12 +200,20 @@ if __name__ == '__main__':
 
         h0 = torch.zeros(batch_size, h_size)
         x_dist, r_dist, c_dist, z_prior, z_post = rssm(x, a, h0)
+
         loss_x = - x_dist.log_prob(x) * mask
         loss_r = - r_dist.log_prob(symlog(r)) * mask
         loss_c = - c_dist.log_prob(c) * mask
-        loss_dyn = kl_divergence(OneHotCategorical(logits=z_prior.detach()), OneHotCategorical(logits=z_post)) * mask
-        loss_rep = kl_divergence(OneHotCategorical(logits=z_prior), OneHotCategorical(logits=z_post.detach())) * mask
+        loss_dyn = kl_divergence(
+            OneHotCategorical(logits=z_prior.detach()),
+            OneHotCategorical(logits=z_post)
+        ).clamp(max=1.) * mask
+        loss_rep = kl_divergence(
+            OneHotCategorical(logits=z_prior),
+            OneHotCategorical(logits=z_post.detach())
+        ).clamp(max=1.) * mask
         loss = (loss_x + loss_r + loss_c + 0.5 * loss_dyn + 0.1 * loss_rep).mean()
+
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -226,7 +233,8 @@ if __name__ == '__main__':
                         subplot.clear()
 
                 # x predictor
-                x, x_est = x.argmax(-1)[mask].flatten().detach().cpu(), x_dist.logits.argmax(-1)[mask].flatten().detach().cpu()
+                x, x_est = x.argmax(-1)[mask].flatten().detach().cpu(), x_dist.logits.argmax(-1)[
+                    mask].flatten().detach().cpu()
                 bins = []
                 for i in range(1, 9):
                     bins += [x_est[x == i]]
