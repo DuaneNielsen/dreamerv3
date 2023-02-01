@@ -33,6 +33,7 @@ from dists import sample_one_hot, OneHotCategoricalStraightThru
 from env import Env
 from replay import ReplayBuffer, simple_trajectory
 from collections import deque
+from symlog import symlog, symexp
 
 
 x_size, x_cls = 1, 10  # input image dims
@@ -198,7 +199,7 @@ if __name__ == '__main__':
         h0 = torch.zeros(batch_size, h_size)
         x_dist, r_dist, c_dist, z_prior, z_post = rssm(x, a, h0)
         loss_x = - x_dist.log_prob(x) * mask
-        loss_r = - r_dist.log_prob(r) * mask
+        loss_r = - r_dist.log_prob(symlog(r)) * mask
         loss_c = - c_dist.log_prob(c) * mask
         loss = (loss_x + loss_r + loss_c).mean()
         opt.zero_grad()
@@ -228,7 +229,7 @@ if __name__ == '__main__':
                 ax[0, 3].plot(list(range(batch, batch + len(loss_x_buff))), loss_x_buff)
 
                 # r predictor
-                r, r_est = r[mask].flatten(), r_dist.mean[mask].flatten()
+                r, r_est = r[mask].flatten(), symexp(r_dist.mean[mask].flatten())
                 bins = []
                 for i in [0.0, 1.0]:
                     bins += [r_est[r == i]]
