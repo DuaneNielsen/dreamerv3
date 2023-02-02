@@ -31,66 +31,141 @@ from dists import OneHotCategoricalStraightThru
 from symlog import symlog, symexp
 
 
-class Encoder(nn.Module):
-    def __init__(self, conf):
+class MLPBlock(nn.Module):
+    def __init__(self, in_features, out_features):
         super().__init__()
-        self.encoder = nn.Linear(conf.h_size + conf.e_size, conf.z_size * conf.z_cls)
-        self.conf = conf
+        self.mlp = nn.Sequential(
+            nn.Linear(in_features, out_features),
+            nn.LayerNorm([out_features]),
+            nn.SiLU()
+        )
+
+    def forward(self, x):
+        return self.mlp(x)
+
+
+class EncoderConvBlock(nn.Module):
+    def __init__(self, in_channels, in_height, in_width, out_channels):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=2, padding=1, padding_mode='replicate'),
+            nn.LayerNorm([out_channels, in_height // 2, in_width // 2]),
+            nn.SiLU(inplace=True))
+
+    def forward(self, x):
+        return self.block(x)
+
+
+class DecoderConvBlock(nn.Module):
+    def __init__(self, out_channels, out_h, out_w, in_channels):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.ConvTranspose2d(in_channels, out_channels, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.LayerNorm([out_channels, out_h, out_w]),
+            nn.SiLU(inplace=True))
+
+    def forward(self, x):
+        return self.block(x)
+
+
+class Embedder(nn.Module):
+    def __init__(self, in_channels=3, cnn_multi=32):
+        super().__init__()
+        self.embedder = nn.Sequential(
+            EncoderConvBlock(in_channels, 64, 64, cnn_multi),
+            EncoderConvBlock(cnn_multi * 2 ** 0, 32, 32, cnn_multi * 2 ** 1),
+            EncoderConvBlock(cnn_multi * 2 ** 1, 16, 16, cnn_multi * 2 ** 2),
+            EncoderConvBlock(cnn_multi * 2 ** 2, 8, 8, cnn_multi * 2 ** 3),
+            nn.Flatten()
+        )
+
+    def forward(self, x):
+        T, N, C, H, W = x.shape
+        return self.embedder(x.flatten(start_dim=0, end_dim=1)).unflatten(0, (T, N))
+
+
+class Encoder(nn.Module):
+    def __init__(self, cnn_multi=32, mlp_layers=2, mlp_hidden=512, h_size=512):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            MLPBlock(4 * 4 * cnn_multi * 2 ** 3 + h_size, mlp_hidden),
+            *[MLPBlock(mlp_hidden, mlp_hidden) for _ in range(mlp_layers - 1)],
+            nn.Linear(mlp_hidden, 32 * 32, bias=False),
+            nn.Unflatten(1, (32, 32))
+        )
 
     def forward(self, h, e):
-        he_flat = torch.cat([h, e], dim=-1)
-        z_flat = self.encoder(he_flat)
-        return z_flat.unflatten(-1, (self.conf.z_size, self.conf.z_cls))
+        return self.encoder(torch.cat([h, e], dim=-1))
 
 
 class Decoder(nn.Module):
-    def __init__(self, conf):
+    def __init__(self, cnn_multi=32, mlp_layers=2, mlp_hidden=512, h_size=512):
         super().__init__()
-        self.decoder = nn.Linear(conf.h_size + conf.z_size * conf.z_cls, conf.x_size * conf.x_cls)
-        self.conf = conf
+        self.decoder = nn.Sequential(
+            nn.Linear(32 * 32 + h_size, mlp_hidden, bias=False),
+            *[MLPBlock(mlp_hidden, mlp_hidden) for _ in range(mlp_layers - 1)],
+            MLPBlock(mlp_hidden, 4 * 4 * cnn_multi * 2 ** 3),
+            nn.Unflatten(-1, (cnn_multi * 2 ** 3, 4, 4)),
+            DecoderConvBlock(cnn_multi * 2 ** 2, 8, 8, cnn_multi * 2 ** 3),
+            DecoderConvBlock(cnn_multi * 2 ** 1, 16, 16, cnn_multi * 2 ** 2),
+            DecoderConvBlock(cnn_multi * 2 ** 0, 32, 32, cnn_multi * 2 ** 1),
+            DecoderConvBlock(1, 64, 64, cnn_multi),
+        )
 
     def forward(self, h, z):
-        """
-        Decoder:              x ~ p( x | h, z )
-        """
+        T, N, D = h.shape
         hz_flat = torch.cat([h, z.flatten(-2)], dim=-1)
-        x_flat = self.decoder(hz_flat)
-        return OneHotCategorical(logits=x_flat.unflatten(-1, (self.conf.x_size, self.conf.x_cls)))
+        hz_flat = hz_flat.flatten(start_dim=0, end_dim=1)
+        x = self.decoder(hz_flat).unflatten(0, (T, N))
+        return Normal(loc=x, scale=1.)
 
 
 class DynamicsPredictor(nn.Module):
-    def __init__(self, conf):
+    def __init__(self, h_size=512, mlp_size=512, mlp_layers=2, z_size=32, z_cls=32):
         super().__init__()
-        self.dynamics_predictor = nn.Linear(conf.h_size, conf.z_size * conf.z_cls)
-        self.conf = conf
+        self.dynamics_predictor = nn.Sequential(
+            MLPBlock(h_size, mlp_size),
+            *[MLPBlock(mlp_size, mlp_size) for _ in range(mlp_layers-1)],
+            nn.Linear(mlp_size, z_size * z_cls, bias=False)
+        )
+        self.z_size = z_size
+        self.z_cls = z_cls
 
     def forward(self, h):
         z_flat = self.dynamics_predictor(h)
-        return z_flat.unflatten(-1, (self.conf.z_size, self.conf.z_cls))
+        return z_flat.unflatten(-1, (self.z_size, self.z_cls))
 
 
 class RewardPredictor(nn.Module):
-    def __init__(self, conf):
+    def __init__(self, h_size=512, mlp_size=512, mlp_layers=2):
         super().__init__()
-        self.reward_predictor = nn.Linear(conf.h_size, 1, bias=False)
+        self.reward_predictor = nn.Sequential(
+            MLPBlock(h_size, mlp_size),
+            *[MLPBlock(mlp_size, mlp_size) for _ in range(mlp_layers-1)],
+            nn.Linear(mlp_size, 1, bias=False)
+        )
 
     def forward(self, h):
         return Normal(loc=self.reward_predictor(h), scale=1.)
 
 
 class ContinuePredictor(nn.Module):
-    def __init__(self, conf):
+    def __init__(self,  h_size=512, mlp_size=512, mlp_layers=2):
         super().__init__()
-        self.continue_predictor = nn.Linear(conf.h_size, 1)
+        self.continue_predictor = nn.Sequential(
+            MLPBlock(h_size, mlp_size),
+            *[MLPBlock(mlp_size, mlp_size) for _ in range(mlp_layers-1)],
+            nn.Linear(mlp_size, 1, bias=False)
+        )
 
     def forward(self, h):
         return Bernoulli(logits=self.continue_predictor(h))
 
 
 class SequenceModel(nn.Module):
-    def __init__(self, conf):
+    def __init__(self, a_cls, a_size=1, h_size=512, z_size=32, z_cls=32):
         super().__init__()
-        self.seq_model = nn.GRUCell(conf.z_size * conf.z_cls + conf.a_size * conf.a_cls, conf.h_size)
+        self.seq_model = nn.GRUCell(z_size * z_cls + a_size * a_cls, h_size)
 
     def forward(self, z, a, h):
         za_flat = torch.cat([z.flatten(-2), a.flatten(-2)], dim=1)
@@ -98,7 +173,7 @@ class SequenceModel(nn.Module):
 
 
 class RSSM(nn.Module):
-    def __init__(self, sequence_model, embedder, encoder, decoder, dynamics_pred, reward_pred, continue_pred, config):
+    def __init__(self, sequence_model, embedder, encoder, decoder, dynamics_pred, reward_pred, continue_pred, h_size=512):
         super().__init__()
         """
          Sequence Model:       h = f( h, z, a )
@@ -110,7 +185,7 @@ class RSSM(nn.Module):
          Decoder:              x ~ p( x | h, z )
         """
 
-        self.conf = config
+        self.h_size = h_size
         self.seq_model = sequence_model
         self.embedder = embedder
         self.encoder = encoder
@@ -118,6 +193,7 @@ class RSSM(nn.Module):
         self.dynamics_pred = dynamics_pred
         self.reward_pred = reward_pred
         self.continue_pred = continue_pred
+
 
         # prediction state
         self.h = None
@@ -185,7 +261,7 @@ class RSSM(nn.Module):
         :param N : batch size for simulation, default 1, ignored if h0 is used
         :param h0: [N, h_size ] : hidden variable to initialize environment, zero if None
         """
-        self.h = h0 if h0 is not None else torch.zeros(N, self.conf.h_size)
+        self.h = h0 if h0 is not None else torch.zeros(N, self.h_size)
         self.z = OneHotCategorical(logits=self.dynamics_pred(self.h)).sample()
         return self.decoder(self.h, self.z).sample()
 
@@ -239,7 +315,7 @@ class RSSMLoss:
         self.loss_rep = None
 
     def __call__(self, x, r, c, mask, x_dist, r_dist, c_dist, z_prior_logits, z_post_logits):
-        self.loss_x = - x_dist.log_prob(x) * mask
+        self.loss_x = - x_dist.log_prob(x).flatten(start_dim=2) * mask
         self.loss_r = - r_dist.log_prob(symlog(r)) * mask
         self.loss_c = - c_dist.log_prob(c) * mask
         self.loss_dyn = kl_divergence(
@@ -250,7 +326,22 @@ class RSSMLoss:
             OneHotCategorical(logits=z_prior_logits),
             OneHotCategorical(logits=z_post_logits.detach())
         ).clamp(max=1.) * mask
-        return (self.loss_x + self.loss_r + self.loss_c + 0.5 * self.loss_dyn + 0.1 * self.loss_rep).mean()
+        return self.loss_x.mean() + self.loss_r.mean() + self.loss_c.mean() + 0.5 * self.loss_dyn.mean() + 0.1 * self.loss_rep.mean()
 
 
-
+def make_small(action_classes, in_channels=3):
+    """
+    Small as per Appendix B of the Mastering Diverse Domains through World Models paper
+    :param action_classes:
+    :return:
+    """
+    return RSSM(
+        sequence_model=SequenceModel(action_classes),
+        embedder=Embedder(in_channels=in_channels),
+        encoder=Encoder(),
+        decoder=Decoder(),
+        dynamics_pred=DynamicsPredictor(),
+        reward_pred=RewardPredictor(),
+        continue_pred=ContinuePredictor(),
+        h_size=512
+    )

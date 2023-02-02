@@ -40,7 +40,7 @@ def is_trajectory_end(step):
     return step.a is None
 
 
-def sample_batch(buffer, length, batch_size):
+def sample_batch(buffer, length, batch_size, pad_state, pad_action):
     """
     Sample a batch from the replay buffer
     :param buffer: replay buffer to sample from
@@ -58,15 +58,15 @@ def sample_batch(buffer, length, batch_size):
         for n, o in enumerate(offsets):
             o = o.item()
             if pad[n] or o + t >= len(buffer):
-                x_i += [Env.pad_state]
-                a_i += [Env.pad_action]
+                x_i += [pad_state]
+                a_i += [pad_action]
                 r_i += [torch.zeros(1)]
                 c_i += [torch.zeros(1)]
                 m_i += [torch.tensor([False])]
             else:
                 x_i += [buffer[o + t].x]
                 if is_trajectory_end(buffer[o + t]):
-                    a_i += [Env.pad_action]
+                    a_i += [pad_action]
                     pad[n] = True
                 else:
                     a_i += [buffer[o + t].a]

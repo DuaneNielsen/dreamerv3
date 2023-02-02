@@ -86,7 +86,7 @@ def make_linear_rssm(config):
         dynamics_pred=DynamicsPredictor(config),
         reward_pred=RewardPredictor(config),
         continue_pred=ContinuePredictor(config),
-        config=config
+        h_size=config.h_size
     )
 
 
@@ -126,7 +126,7 @@ if __name__ == '__main__':
     criterion = RSSMLoss()
 
     for batch in range(5000):
-        x, a, r, c, mask = sample_batch(buff, conf.t_horizon, conf.batch_size)
+        x, a, r, c, mask = sample_batch(buff, conf.t_horizon, conf.batch_size, Env.pad_state, Env.pad_action)
 
         h0 = torch.zeros(conf.batch_size, conf.h_size)
         x_dist, r_dist, c_dist, z_prior, z_post = rssm(x, a, h0)
@@ -225,7 +225,7 @@ if __name__ == '__main__':
                     for step in rollout(go_left):
                         buffer.append(step)
 
-                x_, a, r_, c_, mask = sample_batch(buffer, 8, 12)
+                x_, a, r_, c_, mask = sample_batch(buffer, 8, 12, Env.pad_state, Env.pad_action)
                 x_ = x_.argmax(-1)[mask].flatten()
                 ax[0, 4].set_title("inference marginals")
                 ax[0, 4].hist(x_, bins=8)
