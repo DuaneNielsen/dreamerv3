@@ -88,7 +88,7 @@ def rollout_open_loop_policy(env, actions):
     for a in actions:
         yield Step(x, a, r, c)
         x, r, done, _ = env.step(a)
-        c = ~done * 1.0
+        c = 0.0 if done else 1.0
     yield Step(x, None, r, c)
 
 
