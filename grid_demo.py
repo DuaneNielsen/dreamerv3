@@ -1,5 +1,6 @@
 import gymnasium as gym
 import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
 from minigrid.wrappers import RGBImgObsWrapper
 from replay import sample_batch, Step
 from collections import deque
@@ -54,7 +55,7 @@ if __name__ == '__main__':
     parser.add_argument('--learning_rate', type=float, default=1e-4)
     parser.add_argument('--adam_epsilon', type=float, default=1e-8)
     parser.add_argument('--gradient_clipping', type=float, default=1000.)
-    parser.add_argument('--device', type=float, default='cuda')
+    parser.add_argument('--device', type=str, default='cuda')
     args = parser.parse_args()
 
     buff = deque(maxlen=args.replay_capacity)
@@ -82,17 +83,26 @@ if __name__ == '__main__':
 
     # viz
     fig = plt.figure(constrained_layout=True)
-    ax = fig.add_gridspec(nrows=4, ncols=2, top=0.75, right=0.75).subplots()
-    ax[0, 1].set_title('losses')
-    ax[0, 0].set_ylabel('observation')
+    # ax = fig.add_gridspec(nrows=4, ncols=2, top=0.75, right=0.75).subplots()
 
-    joint_r_plt = PlotJointAndMarginals(ax[1, 0], title='joint distri', ylabel='reward')
-    joint_c_plt = PlotJointAndMarginals(ax[2, 0], ylabel='continue')
-    joint_z_plt = PlotJointAndMarginals(ax[3, 0], ylabel='z - latent')
-    loss_x_plt = PlotLosses(ax[0, 1], num_losses=2)
-    loss_r_plt = PlotLosses(ax[1, 1], num_losses=2)
-    loss_c_plt = PlotLosses(ax[2, 1], num_losses=2)
-    loss_z_plt = PlotLosses(ax[3, 1], num_losses=3)
+    gs = GridSpec(nrows=4, ncols=4, figure=fig)
+    x_gt_img_ax = fig.add_subplot(gs[0, 0])
+    x_mean_img_ax = fig.add_subplot(gs[0, 1])
+    joint_r_ax = fig.add_subplot(gs[1, 0:2])
+    joint_c_ax = fig.add_subplot(gs[2, 0:2])
+    joint_z_ax = fig.add_subplot(gs[3, 0:2])
+    loss_x_ax = fig.add_subplot(gs[0, 3])
+    loss_r_ax = fig.add_subplot(gs[1, 3])
+    loss_c_ax = fig.add_subplot(gs[2, 3])
+    loss_z_ax = fig.add_subplot(gs[3, 3])
+
+    joint_r_plt = PlotJointAndMarginals(joint_r_ax, title='joint distri', ylabel='reward')
+    joint_c_plt = PlotJointAndMarginals(joint_c_ax, ylabel='continue')
+    joint_z_plt = PlotJointAndMarginals(joint_z_ax, ylabel='z - latent')
+    loss_x_plt = PlotLosses(loss_x_ax, num_losses=2)
+    loss_r_plt = PlotLosses(loss_r_ax, num_losses=2)
+    loss_c_plt = PlotLosses(loss_c_ax, num_losses=2)
+    loss_z_plt = PlotLosses(loss_z_ax, num_losses=3)
 
     gen = rollout(env, RepeatOpenLoopPolicy([2, 2, 1, 2, 2]))
     for i in range(10):
@@ -118,7 +128,8 @@ if __name__ == '__main__':
                 x = x.to(dtype=torch.uint8).cpu().numpy()
                 return x
 
-            ax[0, 0].imshow(to_img(symexp(x[0, 0])))
+            x_gt_img_ax.imshow(to_img(symexp(x[0, 0])))
+            x_mean_img_ax.imshow(to_img(symexp(x_dist.mean[0, 0])))
             joint_r_plt.scatter_hist(symexp(r[mask]).flatten().cpu().numpy(), symexp(r_dist.mean[mask]).flatten().cpu().numpy())
             joint_c_plt.scatter_hist(c[mask].flatten().cpu().numpy(), c_dist.probs[mask].flatten().cpu().numpy())
             joint_z_plt.scatter_hist(z_prior.argmax(-1).flatten().cpu().numpy(), z_post.argmax(-1).flatten().cpu().numpy())
