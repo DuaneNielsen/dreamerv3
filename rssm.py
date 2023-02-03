@@ -27,7 +27,7 @@
 import torch
 import torch.nn as nn
 from torch.distributions import OneHotCategorical, Normal, Bernoulli, kl_divergence
-from dists import OneHotCategoricalStraightThru
+from dists import OneHotCategoricalStraightThru, categorical_kl_divergence_clamped
 from symlog import symlog, symexp
 
 
@@ -318,15 +318,14 @@ class RSSMLoss:
         self.loss_x = - x_dist.log_prob(x).flatten(start_dim=2) * mask
         self.loss_r = - r_dist.log_prob(symlog(r)) * mask
         self.loss_c = - c_dist.log_prob(c) * mask
-        self.loss_dyn = kl_divergence(
-            OneHotCategorical(logits=z_prior_logits.detach()),
-            OneHotCategorical(logits=z_post_logits)
-        ).clamp(max=1.) * mask
-        self.loss_rep = kl_divergence(
-            OneHotCategorical(logits=z_prior_logits),
-            OneHotCategorical(logits=z_post_logits.detach())
-        ).clamp(max=1.) * mask
-        return self.loss_x.mean() + self.loss_r.mean() + self.loss_c.mean() + 0.5 * self.loss_dyn.mean() + 0.1 * self.loss_rep.mean()
+        self.loss_dyn = 0.5 * categorical_kl_divergence_clamped(z_prior_logits.detach(), z_post_logits) * mask
+        self.loss_rep = 0.1 * categorical_kl_divergence_clamped(z_prior_logits, z_post_logits.detach()) * mask
+        self.loss_x = self.loss_x.mean()
+        self.loss_r = self.loss_r.mean()
+        self.loss_c = self.loss_c.mean()
+        self.loss_dyn = self.loss_dyn.mean()
+        self.loss_rep = self.loss_rep.mean()
+        return self.loss_x + self.loss_r + self.loss_c + self.loss_dyn + self.loss_rep
 
 
 def make_small(action_classes, in_channels=3):
