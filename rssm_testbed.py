@@ -137,11 +137,11 @@ if __name__ == '__main__':
         opt.step()
 
         loss_buff += [loss.item()]
-        loss_x_buff += [criterion.loss_x.mean().item()]
-        loss_r_buff += [criterion.loss_r.mean().item()]
-        loss_c_buff += [criterion.loss_c.mean().item()]
-        loss_dyn_buff += [criterion.loss_dyn.mean().item() * 0.5]
-        loss_rep_buff += [criterion.loss_rep.mean().item() * 0.1]
+        loss_x_buff += [criterion.loss_x.item()]
+        loss_r_buff += [criterion.loss_r.item()]
+        loss_c_buff += [criterion.loss_c.item()]
+        loss_dyn_buff += [criterion.loss_dyn.item()]
+        loss_rep_buff += [criterion.loss_rep.item()]
 
         # visualize training
         with torch.no_grad():
