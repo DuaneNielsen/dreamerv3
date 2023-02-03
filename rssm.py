@@ -56,6 +56,19 @@ class EncoderConvBlock(nn.Module):
         return self.block(x)
 
 
+class ModernDecoderConvBlock(nn.Module):
+    def __init__(self, out_channels, out_h, out_w, in_channels):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.UpsamplingNearest2d(scale_factor=2),
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1, padding_mode='replicate'),
+            nn.LayerNorm([out_channels, out_h, out_w]),
+            nn.SiLU(inplace=True))
+
+    def forward(self, x):
+        return self.block(x)
+
+
 class DecoderConvBlock(nn.Module):
     def __init__(self, out_channels, out_h, out_w, in_channels):
         super().__init__()
@@ -99,17 +112,17 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, cnn_multi=32, mlp_layers=2, mlp_hidden=512, h_size=512):
+    def __init__(self, out_channels=3, cnn_multi=32, mlp_layers=2, mlp_hidden=512, h_size=512):
         super().__init__()
         self.decoder = nn.Sequential(
             nn.Linear(32 * 32 + h_size, mlp_hidden, bias=False),
             *[MLPBlock(mlp_hidden, mlp_hidden) for _ in range(mlp_layers - 1)],
             MLPBlock(mlp_hidden, 4 * 4 * cnn_multi * 2 ** 3),
             nn.Unflatten(-1, (cnn_multi * 2 ** 3, 4, 4)),
-            DecoderConvBlock(cnn_multi * 2 ** 2, 8, 8, cnn_multi * 2 ** 3),
-            DecoderConvBlock(cnn_multi * 2 ** 1, 16, 16, cnn_multi * 2 ** 2),
-            DecoderConvBlock(cnn_multi * 2 ** 0, 32, 32, cnn_multi * 2 ** 1),
-            DecoderConvBlock(1, 64, 64, cnn_multi),
+            ModernDecoderConvBlock(cnn_multi * 2 ** 2, 8, 8, cnn_multi * 2 ** 3),
+            ModernDecoderConvBlock(cnn_multi * 2 ** 1, 16, 16, cnn_multi * 2 ** 2),
+            ModernDecoderConvBlock(cnn_multi * 2 ** 0, 32, 32, cnn_multi * 2 ** 1),
+            ModernDecoderConvBlock(out_channels, 64, 64, cnn_multi),
         )
 
     def forward(self, h, z):
@@ -338,7 +351,7 @@ def make_small(action_classes, in_channels=3):
         sequence_model=SequenceModel(action_classes),
         embedder=Embedder(in_channels=in_channels),
         encoder=Encoder(),
-        decoder=Decoder(),
+        decoder=Decoder(out_channels=in_channels),
         dynamics_pred=DynamicsPredictor(),
         reward_pred=RewardPredictor(),
         continue_pred=ContinuePredictor(),
