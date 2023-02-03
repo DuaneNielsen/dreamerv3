@@ -1,6 +1,6 @@
 import torch
 from torch.nn.functional import softmax
-from torch.distributions import OneHotCategorical
+from torch.distributions import OneHotCategorical, kl_divergence
 
 
 def sample_one_hot(logits, epsilon=0.01):
@@ -21,3 +21,10 @@ class OneHotCategoricalStraightThru(OneHotCategorical):
 
     def sample(self, epsilon=0.01):
         return super().sample() + self.probs - self.probs.detach()
+
+
+def categorical_kl_divergence_clamped(logits_left, logits_right, clamp=1.):
+    return kl_divergence(
+        OneHotCategorical(logits=logits_left),
+        OneHotCategorical(logits=logits_right)
+    ).clamp(max=1.)
