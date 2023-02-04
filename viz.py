@@ -1,6 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from collections import deque
+import torch
+from torch.nn.functional import conv1d
 
 """
 https://matplotlib.org/stable/gallery/lines_bars_and_markers/scatter_hist.html#sphx-glr-gallery-lines-bars-and-markers-scatter-hist-py
@@ -56,16 +58,39 @@ class PlotJointAndMarginals:
 
 
 class PlotLosses:
-    def __init__(self, ax, num_losses, maxlen=1000):
+    def __init__(self, ax, num_losses, maxlen=1000, downsample=10):
+        self.steps = 0
         self.history = [deque(maxlen=maxlen) for _ in range(num_losses)]
         self.ax = ax
+        self.downsample = downsample
+        self.weights = torch.ones(1, 1, downsample) / downsample
 
-    def plot(self, *args):
+    def update(self, *args):
         assert len(args) == len(self.history), f"expected num_losses = {len(self.history)} losses"
-        self.ax.cla()
         for i in range(len(self.history)):
             self.history[i] += [args[i]]
-            self.ax.plot(self.history[i])
+        self.steps += 1
+
+    def plot(self):
+        with torch.no_grad():
+            self.ax.cla()
+            for i in range(len(self.history)):
+                loss_value = torch.tensor([self.history[i]]).float()
+                loss_value = conv1d(loss_value, weight=self.weights, stride=self.downsample).squeeze()
+                x = np.arange(self.steps - len(loss_value) * self.downsample, self.steps, step=self.downsample)
+                self.ax.plot(x, loss_value)
+
+
+class PlotImage:
+    def __init__(self, ax):
+        self.ax = ax
+        self.image = None
+
+    def imshow(self, image):
+        if self.image is None:
+            self.image = self.ax.imshow(image)
+        else:
+            self.image.set_data(image)
 
 
 if __name__ == '__main__':
@@ -93,6 +118,7 @@ if __name__ == '__main__':
     joint2_plot.scatter_hist(x, y)
     loss1_plot = PlotLosses(ax[0, 1], 2)
     for loss, loss2 in zip(loss, loss2):
-        loss1_plot.plot(loss, loss2)
+        loss1_plot.update(loss, loss2)
+    loss1_plot.plot()
 
     plt.show()

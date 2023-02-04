@@ -8,7 +8,7 @@ a -> action
 r -> reward
 c -> continue, 0.0 means terminal state
 """
-Step = namedtuple("step", ['x', 'a', 'r', 'c'])
+Step = namedtuple("step", ['obs', 'act', 'reward', 'cont'])
 
 
 def is_trajectory_end(step):
@@ -37,7 +37,7 @@ def is_trajectory_end(step):
     :param step: Step tuple
     :return: True if this state is terminal
     """
-    return step.a is None
+    return step.act is None
 
 
 def sample_batch(buffer, length, batch_size, pad_state, pad_action):
@@ -64,14 +64,14 @@ def sample_batch(buffer, length, batch_size, pad_state, pad_action):
                 c_i += [torch.zeros(1)]
                 m_i += [torch.tensor([False])]
             else:
-                x_i += [buffer[o + t].x]
+                x_i += [buffer[o + t].obs]
                 if is_trajectory_end(buffer[o + t]):
                     a_i += [pad_action]
                     pad[n] = True
                 else:
-                    a_i += [buffer[o + t].a]
-                r_i += [torch.tensor([buffer[o + t].r])]
-                c_i += [torch.tensor([buffer[o + t].c])]
+                    a_i += [buffer[o + t].act]
+                r_i += [torch.tensor([buffer[o + t].reward])]
+                c_i += [torch.tensor([buffer[o + t].cont])]
                 m_i += [torch.tensor([True])]
 
         x += [torch.stack(x_i)]
