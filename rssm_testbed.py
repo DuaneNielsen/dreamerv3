@@ -137,9 +137,9 @@ if __name__ == '__main__':
         opt.step()
 
         loss_buff += [loss.item()]
-        loss_x_buff += [criterion.loss_x.item()]
-        loss_r_buff += [criterion.loss_r.item()]
-        loss_c_buff += [criterion.loss_c.item()]
+        loss_x_buff += [criterion.loss_obs.item()]
+        loss_r_buff += [criterion.loss_reward.item()]
+        loss_c_buff += [criterion.loss_cont.item()]
         loss_dyn_buff += [criterion.loss_dyn.item()]
         loss_rep_buff += [criterion.loss_rep.item()]
 

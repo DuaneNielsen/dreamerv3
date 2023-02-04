@@ -321,24 +321,24 @@ class RSSM(nn.Module):
 
 class RSSMLoss:
     def __init__(self):
-        self.loss_x = None
-        self.loss_r = None
-        self.loss_c = None
+        self.loss_obs = None
+        self.loss_reward = None
+        self.loss_cont = None
         self.loss_dyn = None
         self.loss_rep = None
 
-    def __call__(self, x, r, c, mask, x_dist, r_dist, c_dist, z_prior_logits, z_post_logits):
-        self.loss_x = - x_dist.log_prob(x).flatten(start_dim=2) * mask
-        self.loss_r = - r_dist.log_prob(symlog(r)) * mask
-        self.loss_c = - c_dist.log_prob(c) * mask
+    def __call__(self, obs, reward, cont, mask, obs_dist, reward_dist, cont_dist, z_prior_logits, z_post_logits):
+        self.loss_obs = - obs_dist.log_prob(obs).flatten(start_dim=2) * mask
+        self.loss_reward = - reward_dist.log_prob(symlog(reward)) * mask
+        self.loss_cont = - cont_dist.log_prob(cont) * mask
         self.loss_dyn = 0.5 * categorical_kl_divergence_clamped(z_prior_logits.detach(), z_post_logits) * mask
         self.loss_rep = 0.1 * categorical_kl_divergence_clamped(z_prior_logits, z_post_logits.detach()) * mask
-        self.loss_x = self.loss_x.mean()
-        self.loss_r = self.loss_r.mean()
-        self.loss_c = self.loss_c.mean()
+        self.loss_obs = self.loss_obs.mean()
+        self.loss_reward = self.loss_reward.mean()
+        self.loss_cont = self.loss_cont.mean()
         self.loss_dyn = self.loss_dyn.mean()
         self.loss_rep = self.loss_rep.mean()
-        return self.loss_x + self.loss_r + self.loss_c + self.loss_dyn + self.loss_rep
+        return self.loss_obs + self.loss_reward + self.loss_cont + self.loss_dyn + self.loss_rep
 
 
 def make_small(action_classes, in_channels=3):

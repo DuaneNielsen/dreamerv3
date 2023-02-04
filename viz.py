@@ -16,7 +16,7 @@ class PlotJointAndMarginals:
         self.ylabel = ylabel
         self.xlabel = xlabel
 
-    def scatter_hist(self, x, y):
+    def scatter_hist(self, x, y, binwidth=0.25):
         self.ax.cla()
         self.ax.set(aspect=1)
         self.ax.set_title(self.title)
@@ -36,7 +36,6 @@ class PlotJointAndMarginals:
         self.ax_histy.tick_params(axis="y", labelleft=False)
 
         # now determine nice limits by hand:
-        binwidth = 0.25
         xymax = max(np.max(x), np.max(y))
         xymin = min(np.min(x), np.min(y))
 

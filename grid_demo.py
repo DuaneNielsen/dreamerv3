@@ -1,6 +1,5 @@
 import gymnasium as gym
-import matplotlib.pyplot as plt
-from matplotlib.gridspec import GridSpec
+import numpy as np
 from minigrid.wrappers import RGBImgObsWrapper
 from replay import sample_batch, Step
 from collections import deque
@@ -10,10 +9,11 @@ from rssm import make_small, RSSMLoss
 import torch
 from torch.optim import Adam
 from argparse import ArgumentParser
-from viz import PlotLosses, PlotJointAndMarginals, PlotImage
 from symlog import symlog, symexp
 from time import time
 import utils
+import wandb
+from torchvision.utils import make_grid
 
 
 def prepro(x):
@@ -32,64 +32,59 @@ class RepeatOpenLoopPolicy:
         return one_hot(torch.tensor([a]), 4)
 
 
-class Dashboard:
-    def __init__(self):
-        # viz
-        self.fig = plt.figure(constrained_layout=True)
+def log_loss(loss, criterion):
+    wandb.log({
+        'loss': loss.item(),
+        'loss_pred': criterion.loss_obs.item() + criterion.loss_reward.item() + criterion.loss_cont.item(),
+        'loss_dyn': criterion.loss_dyn.item(),
+        'loss_rep': criterion.loss_rep.item()
+    })
 
-        self.grid_spec = GridSpec(nrows=4, ncols=4, figure=self.fig)
-        self.xt_img_ax = self.fig.add_subplot(self.grid_spec[0, 0])
-        self.x_mean_img_ax = self.fig.add_subplot(self.grid_spec[0, 1])
-        self.x_mean_dist_ax = self.fig.add_subplot(self.grid_spec[0, 2])
-        self.joint_r_ax = self.fig.add_subplot(self.grid_spec[1, 0:2])
-        self.joint_c_ax = self.fig.add_subplot(self.grid_spec[2, 0:2])
-        self.joint_z_ax = self.fig.add_subplot(self.grid_spec[3, 0:2])
-        self.loss_x_ax = self.fig.add_subplot(self.grid_spec[0, 3])
-        self.loss_r_ax = self.fig.add_subplot(self.grid_spec[1, 3])
-        self.loss_c_ax = self.fig.add_subplot(self.grid_spec[2, 3])
-        self.loss_z_ax = self.fig.add_subplot(self.grid_spec[3, 3])
 
-        self.x_gt_img_plt = PlotImage(self.xt_img_ax)
-        self.x_mean_img_plt = PlotImage(self.x_mean_img_ax)
-        self.joint_r_plt = PlotJointAndMarginals(self.joint_r_ax, title='joint distri', ylabel='reward')
-        self.joint_c_plt = PlotJointAndMarginals(self.joint_c_ax, ylabel='continue')
-        self.joint_z_plt = PlotJointAndMarginals(self.joint_z_ax, ylabel='z - latent')
-        self.loss_x_plt = PlotLosses(self.loss_x_ax, num_losses=2)
-        self.loss_r_plt = PlotLosses(self.loss_r_ax, num_losses=2)
-        self.loss_c_plt = PlotLosses(self.loss_c_ax, num_losses=2)
-        self.loss_z_plt = PlotLosses(self.loss_z_ax, num_losses=3)
-        plt.pause(0.1)
+def log_confusion_and_hist_from_scalars(name, ground_truth, pred, min, max, num_bins):
+    bins = np.linspace(min, max, num_bins)
+    ground_truth_digital = np.digitize(ground_truth, bins=bins, right=True)
+    pred_digital = np.digitize(pred, bins=bins)
+    labels = [f'{b:.2f}' for b in bins]
+    wandb.log({
+        f'{name}_gt': wandb.Histogram(ground_truth, num_bins=num_bins),
+        f'{name}_pred': wandb.Histogram(pred, num_bins=num_bins),
+        f'{name}_confusion': wandb.plot.confusion_matrix(y_true=ground_truth_digital, preds=pred_digital, class_names=labels),
+    })
 
-    def update_loss(self, loss, criterion):
-        self.loss_x_plt.update(loss.item(), criterion.loss_x.item())
-        self.loss_r_plt.update(loss.item(), criterion.loss_r.item())
-        self.loss_c_plt.update(loss.item(), criterion.loss_c.item())
-        self.loss_z_plt.update(loss.item(), criterion.loss_dyn.item(), criterion.loss_rep.item())
 
-    def plot(self, x, r, c, mask, x_dist, r_dist, c_dist, z_prior, z_post):
-        def to_img(x):
-            x = x.permute(1, 2, 0) * 255
-            x = x.to(dtype=torch.uint8).clamp(0, 255).cpu().numpy()
-            return x
+def log(obs, r, c, mask, obs_dist, r_dist, c_dist, z_prior, z_post):
+    with torch.no_grad():
+        reward_gt = symexp(r[mask]).flatten().cpu().numpy()
+        reward_mean = symexp(r_dist.mean[mask]).flatten().cpu().numpy()
+        cont_gt = c[mask].flatten().cpu().numpy()
+        cont_probs = c_dist.probs[mask].flatten().cpu().numpy()
+        z_prior_argmax, z_post_argmax = z_prior.argmax(-1).flatten().cpu().numpy(), z_post.argmax(
+            -1).flatten().cpu().numpy()
 
-        self.x_gt_img_plt.imshow(to_img(symexp(x[0, 0])))
-        self.x_mean_img_plt.imshow(to_img(symexp(x_dist.mean[0, 0])))
-        x_hist = torch.masked_select(symexp(x_dist.mean).flatten(start_dim=2), mask)
-        sample = torch.rand_like(x_hist)
-        x_hist = x_hist[sample < 0.01] * 255
-        self.x_mean_dist_ax.cla()
-        self.x_mean_dist_ax.hist(x_hist.to(dtype=torch.uint8).cpu())
-        self.joint_r_plt.scatter_hist(symexp(r[mask]).flatten().cpu().numpy(), symexp(r_dist.mean[mask]).flatten().cpu().numpy())
-        self.joint_c_plt.scatter_hist(c[mask].flatten().cpu().numpy(), c_dist.probs[mask].flatten().cpu().numpy())
-        self.joint_z_plt.scatter_hist(z_prior.argmax(-1).flatten().cpu().numpy(), z_post.argmax(-1).flatten().cpu().numpy())
-        self.loss_x_plt.plot()
-        self.loss_r_plt.plot()
-        self.loss_c_plt.plot()
-        self.loss_z_plt.plot()
-        plt.pause(0.05)
+        obs_grid = make_grid(symexp(obs[0:8, 0:8] * mask[:, 0:8, None, None]).flatten(0, 1))
+        obs_pred_mean_grid = make_grid(symexp(obs_dist.mean[0:8, 0:8] * mask[0:8, 0:8, None, None]).flatten(0, 1))
+        obs_panel = torch.cat((obs_grid, obs_pred_mean_grid), dim=-1)
 
-    def save(self, filename):
-        plt.savefig(filename)
+        wandb.log({
+            'obs_panel': wandb.Image(obs_panel),
+        })
+        log_confusion_and_hist_from_scalars('reward', reward_gt, reward_mean, 0.0, 1.0, 5)
+        log_confusion_and_hist_from_scalars('continue', cont_gt, cont_probs, 0.0, 1.0, 5)
+        z_labels = [f'{l:02d}' for l in list(range(32))]
+        wandb.log({
+            f'z_post': wandb.Histogram(z_post_argmax),
+            f'z_prior': wandb.Histogram(z_prior_argmax),
+            f'z_prior_z_post_confusion': wandb.plot.confusion_matrix(y_true=z_prior_argmax, preds=z_post_argmax, class_names=z_labels),
+        })
+
+
+def log_confusion_and_hist(name, ground_truth, pred):
+    wandb.log({
+        f'{name}_gt': wandb.Histogram(ground_truth),
+        f'{name}_pred': wandb.Histogram(pred),
+        f'{name}_confusion': wandb.plot.confusion_matrix(y_true=ground_truth, preds=pred),
+    })
 
 
 def random_policy(x):
@@ -121,7 +116,8 @@ if __name__ == '__main__':
     parser.add_argument('--resume', type=str, default=None)
     args = parser.parse_args()
 
-    dashboard = Dashboard()
+    wandb.init(project="dreamerv3-minigrid-demo")
+    wandb.config.update(args)
 
     """
     Environment action space
@@ -160,7 +156,8 @@ if __name__ == '__main__':
     while True:
         buff += [next(gen)]
         obs, act, reward, cont, mask = sample_batch(buff, args.batch_length, args.batch_size, pad_state, pad_action)
-        obs, act, reward, cont, mask = obs.to(args.device), act.to(args.device), reward.to(args.device), cont.to(args.device), mask.to(args.device)
+        obs, act, reward, cont, mask = obs.to(args.device), act.to(args.device), reward.to(args.device), cont.to(
+            args.device), mask.to(args.device)
         obs = symlog(obs)
         reward = symlog(reward)
 
@@ -172,17 +169,14 @@ if __name__ == '__main__':
         loss.backward()
         opt.step()
 
-        dashboard.update_loss(loss, criterion)
+        log_loss(loss, criterion)
         steps += 1
 
-        if steps % 300 == 0:
+        if steps % 20 == 0:
             end_train = time()
-            with torch.no_grad():
-                dashboard.plot(obs, reward, cont, mask, obs_dist, rew_dist, cont_dist, z_prior, z_post)
+            log(obs, reward, cont, mask, obs_dist, rew_dist, cont_dist, z_prior, z_post)
             utils.save(utils.run.rundir, rssm, opt, args, steps, loss.item())
-            dashboard.save(utils.run.rundir + '/dashboard.png')
             end_plot = time()
 
             print(f'train time: {end_train - start_t} plot time: {end_plot - end_train}')
             start_t = time()
-
