@@ -6,7 +6,7 @@ from symlog import symlog, symexp
 from argparse import ArgumentParser
 from matplotlib import pyplot as plt
 from env import Env
-from replay import Step, sample_batch, rollout_open_loop_policy
+from replay import Step, sample_batch
 from collections import deque
 from rssm import RSSM, RSSMLoss
 
@@ -88,6 +88,15 @@ def make_linear_rssm(config):
         continue_pred=ContinuePredictor(config),
         h_size=config.h_size
     )
+
+
+def rollout_open_loop_policy(env, actions):
+    x, r, c = env.reset(), 0, 1.0
+    for a in actions:
+        yield Step(x, a, r, c)
+        x, r, done, _ = env.step(a)
+        c = 0.0 if done else 1.0
+    yield Step(x, None, r, c)
 
 
 if __name__ == '__main__':

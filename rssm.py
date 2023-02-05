@@ -126,10 +126,15 @@ class Decoder(nn.Module):
         )
 
     def forward(self, h, z):
-        T, N, D = h.shape
-        hz_flat = torch.cat([h, z.flatten(-2)], dim=-1)
-        hz_flat = hz_flat.flatten(start_dim=0, end_dim=1)
-        x = self.decoder(hz_flat).unflatten(0, (T, N))
+        if len(h.shape) == 3:
+            T, N, D = h.shape
+            hz_flat = torch.cat([h, z.flatten(-2)], dim=-1)
+            hz_flat = hz_flat.flatten(start_dim=0, end_dim=1)
+            x = self.decoder(hz_flat).unflatten(0, (T, N))
+        else:
+            hz_flat = torch.cat([h, z.flatten(-2)], dim=-1)
+            x = self.decoder(hz_flat)
+
         return Normal(loc=x, scale=1.)
 
 
@@ -206,11 +211,15 @@ class RSSM(nn.Module):
         self.dynamics_pred = dynamics_pred
         self.reward_pred = reward_pred
         self.continue_pred = continue_pred
-
+        self.dummy = nn.Parameter(torch.empty(0))
 
         # prediction state
         self.h = None
         self.z = None
+
+    @property
+    def device(self):
+        return self.dummy.device
 
     def forward(self, x, a, h0):
         """
@@ -274,9 +283,9 @@ class RSSM(nn.Module):
         :param N : batch size for simulation, default 1, ignored if h0 is used
         :param h0: [N, h_size ] : hidden variable to initialize environment, zero if None
         """
-        self.h = h0 if h0 is not None else torch.zeros(N, self.h_size)
+        self.h = h0 if h0 is not None else torch.zeros(N, self.h_size, device=self.device)
         self.z = OneHotCategorical(logits=self.dynamics_pred(self.h)).sample()
-        return self.decoder(self.h, self.z).sample()
+        return self.h, self.z
 
     def step(self, a):
         """
@@ -313,10 +322,9 @@ class RSSM(nn.Module):
 
         self.h = self.seq_model(self.z, a, self.h)
         self.z = OneHotCategorical(logits=self.dynamics_pred(self.h)).sample()
-        x_ = self.decoder(self.h, self.z).sample()
-        r_ = self.reward_pred(self.h).sample()
-        c_ = self.continue_pred(self.h).sample()
-        return x_, symexp(r_), c_
+        r_ = self.reward_pred(self.h).mean
+        c_ = self.continue_pred(self.h).probs
+        return self.h, self.z, symexp(r_), c_
 
 
 class RSSMLoss:

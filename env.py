@@ -7,7 +7,7 @@ def reward(state):
 
 
 def done(state):
-    return state == 9
+    return state == 9 or state == 0
 
 
 class Env:

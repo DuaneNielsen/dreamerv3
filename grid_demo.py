@@ -1,10 +1,10 @@
 import gymnasium as gym
 import numpy as np
 from minigrid.wrappers import RGBImgObsWrapper
-from replay import sample_batch, Step
+from replay import sample_batch, Step, get_trajectories, stack_trajectory
 from collections import deque
 from torch.nn.functional import one_hot
-from torchvision.transforms.functional import resize
+from torchvision.transforms.functional import resize, to_tensor
 from rssm import make_small, RSSMLoss
 import torch
 from torch.optim import Adam
@@ -14,6 +14,8 @@ from time import time
 import utils
 import wandb
 from torchvision.utils import make_grid
+from PIL import Image, ImageDraw, ImageFont
+from matplotlib import font_manager
 
 
 def prepro(x):
@@ -45,7 +47,7 @@ def log_confusion_and_hist_from_scalars(name, ground_truth, pred, min, max, num_
     bins = np.linspace(min, max, num_bins)
     ground_truth_digital = np.digitize(ground_truth, bins=bins, right=True)
     pred_digital = np.digitize(pred, bins=bins)
-    labels = [f'{b:.2f}' for b in bins]
+    labels = [f'{b:.2f}' for b in bins] + [f'>{bins[-1]:.2f}']
     wandb.log({
         f'{name}_gt': wandb.Histogram(ground_truth, num_bins=num_bins),
         f'{name}_pred': wandb.Histogram(pred, num_bins=num_bins),
@@ -103,6 +105,51 @@ def rollout(env, policy, seed=42):
             (x, _), r, c = env.reset(seed=seed), 0, 1.0
 
 
+def rollout_on_world_model(env, policy):
+    (h, z), r, c = env.reset(), [0], [1.0]
+    x = env.decoder(h, z).mean
+    while True:
+        a = policy(x).unsqueeze(0).to(env.device)
+        yield Step(x[0], a[0], r[0], c[0])
+        h, z, r, c = env.step(a)
+        x = env.decoder(h, z).mean
+        if c[0] < 0.5:
+            yield Step(x[0], None, r[0], c[0])
+            x, r, c = env.reset(), [0], [1.0]
+
+
+def make_caption(caption, width, height):
+    img = Image.new('RGB', (width, height))
+    d = ImageDraw.Draw(img)
+    # font = ImageFont.truetype(font_manager.findSystemFonts(fontext='ttf')[0])
+    d.text((1, 5), caption)
+    return to_tensor(img)
+
+
+def log_trajectory(trajectory):
+    with torch.no_grad():
+        obs, action, reward, cont = stack_trajectory(trajectory, pad_action=pad_action.to(rssm.device))
+
+        panel = []
+        for i, o in enumerate(obs.unbind(0)):
+            caption = make_caption(f'{reward[i].item():.2f} {cont[i].item():.2f}', 64, 16)
+            panel += [torch.cat([o, caption.to(o.device)], dim=1)]
+        panel = torch.stack(panel)
+
+        panel = make_grid(panel)
+
+        wandb.log({
+            'imagined_obs': wandb.Image(panel)
+        })
+
+
+def generate_and_log_trajectory_on_world_model(rssm, policy):
+    imagination_gen = rollout_on_world_model(rssm, policy)
+    imagine_buffer = [next(imagination_gen) for step in range(16)]
+    trajectories = get_trajectories(imagine_buffer)
+    log_trajectory(trajectories[0])
+
+
 if __name__ == '__main__':
 
     parser = ArgumentParser()
@@ -154,6 +201,7 @@ if __name__ == '__main__':
 
     start_t = time()
     while True:
+
         buff += [next(gen)]
         obs, act, reward, cont, mask = sample_batch(buff, args.batch_length, args.batch_size, pad_state, pad_action)
         obs, act, reward, cont, mask = obs.to(args.device), act.to(args.device), reward.to(args.device), cont.to(
@@ -172,11 +220,13 @@ if __name__ == '__main__':
         log_loss(loss, criterion)
         steps += 1
 
-        if steps % 20 == 0:
+        if steps % 200 == 0:
             end_train = time()
             log(obs, reward, cont, mask, obs_dist, rew_dist, cont_dist, z_prior, z_post)
             utils.save(utils.run.rundir, rssm, opt, args, steps, loss.item())
-            end_plot = time()
 
+            generate_and_log_trajectory_on_world_model(rssm, RepeatOpenLoopPolicy([2, 2, 1, 2, 2]))
+
+            end_plot = time()
             print(f'train time: {end_train - start_t} plot time: {end_plot - end_train}')
             start_t = time()
