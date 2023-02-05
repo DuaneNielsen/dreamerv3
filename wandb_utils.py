@@ -45,14 +45,18 @@ def make_caption(caption, width, height):
     return to_tensor(img)
 
 
-def log_trajectory(trajectory, pad_action):
+def log_trajectory(trajectory, pad_action, symexp_on=True):
     with torch.no_grad():
         obs, action, reward, cont = stack_trajectory(trajectory, pad_action=pad_action)
-        obs = symexp(obs)
+        if symexp_on:
+            obs = symexp(obs)
 
         panel = []
         for i, o in enumerate(obs.unbind(0)):
-            caption = make_caption(f'{symexp(reward[i]).item():.2f} {cont[i].item():.2f}', 64, 16)
+            if symexp_on:
+                caption = make_caption(f'{symexp(reward[i]).item():.2f} {cont[i].item():.2f}', 64, 16)
+            else:
+                caption = make_caption(f'{reward[i].item():.2f} {cont[i].item():.2f}', 64, 16)
             panel += [torch.cat([o, caption.to(o.device)], dim=1)]
         panel = torch.stack(panel)
 
