@@ -13,7 +13,8 @@ from time import time
 import utils
 import wandb
 from torchvision.utils import make_grid
-from wandb_utils import log_loss, log_confusion_and_hist_from_scalars, log_trajectory, log_training_panel
+from wandb_utils import log_loss, log_confusion_and_hist_from_scalars, log_trajectory, log_training_panel, \
+    log_nonzero_rewards_panel, log_terminal_state_panel
 
 
 def prepro(x):
@@ -35,7 +36,9 @@ class RepeatOpenLoopPolicy:
 def log(obs, action, r, c, mask, obs_dist, r_dist, c_dist, z_prior, z_post):
     with torch.no_grad():
 
-        log_training_panel(obs, action, reward, cont, obs_dist, rew_dist, cont_dist, mask, action_table=action_table)
+        log_training_panel(obs, action, reward, cont, obs_dist.mean, r_dist.mean, c_dist.probs, mask, action_table=action_table)
+        log_nonzero_rewards_panel(obs, action, reward, cont, obs_dist.mean, r_dist.mean, c_dist.probs, mask, action_table=action_table)
+        log_terminal_state_panel(obs, action, reward, cont, obs_dist.mean, r_dist.mean, c_dist.probs, mask, action_table=action_table)
 
         reward_gt = symexp(r[mask]).flatten().cpu().numpy()
         reward_mean = symexp(r_dist.mean[mask]).flatten().cpu().numpy()

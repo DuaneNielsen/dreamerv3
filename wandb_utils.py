@@ -70,36 +70,62 @@ def log_trajectory(trajectory, pad_action, symexp_on=True, action_table=None):
         })
 
 
-def log_training_panel(obs, action, reward, cont, obs_dist, reward_dist, cont_dist, mask, sym_exp_on=True, action_table=None):
+def make_panel(obs, action, reward, cont, mask, filter_mask=None, sym_exp_on=True, action_table=None):
+    """
+    obs: observations [..., C, H, W]
+    action: discrete action [..., AD, AC]
+    reward: rewards [..., 1]
+    cont: continue [..., 1]
+    filter_mask: booleans, filter results in panel [...]
+    sym_exp_on: obs and rewards are read out in sym_exp
+    action_table: {0: "action1", 1:{action2}... etc}
+    """
 
-    obs_sample = obs[0:8, 0:8] * mask[0:8, 0:8, None, None]
-    action_sample = action[0:8, 0:8] * mask[0:8, 0:8, None]
-    reward_sample = reward[0:8, 0:8] * mask[0:8, 0:8]
-    cont_sample = cont[0:8, 0:8] * mask[0:8, 0:8]
+    if filter_mask is None:
+        filter_mask = torch.full_like(mask.unsqueeze(-1), True, dtype=torch.bool)
 
-    obs_pred_sample = obs_dist.mean[0:8, 0:8] * mask[0:8, 0:8, None, None]
-    reward_pred_sample = reward_dist.mean[0:8, 0:8] * mask[0:8, 0:8]
-    cont_pred_sample = cont_dist.probs[0:8, 0:8] * mask[0:8, 0:8]
-
-    obs_sample = obs_sample.flatten(0, 1)
-    action_sample = action_sample.flatten(0, 1)
-    reward_sample = reward_sample.flatten(0, 1)
-    cont_sample = cont_sample.flatten(0, 1)
-
-    obs_pred_sample = obs_pred_sample.flatten(0, 1)
-    reward_pred_sample = reward_pred_sample.flatten(0, 1)
-    cont_pred_sample = cont_pred_sample.flatten(0, 1)
+    obs_sample = obs[filter_mask] * mask[filter_mask][..., None, None]
+    action_sample = action[filter_mask] * mask[filter_mask][..., None]
+    reward_sample = reward[filter_mask] * mask[filter_mask]
+    cont_sample = cont[filter_mask] * mask[filter_mask]
 
     if sym_exp_on:
-        obs_sample, obs_pred_sample = symexp(obs_sample), symexp(obs_pred_sample)
-        reward_sample, reward_pred_sample = symexp(reward_sample), symexp(reward_pred_sample)
+        obs_sample = symexp(obs_sample)
+        reward_sample = symexp(reward_sample)
 
-    gt_panel = [add_caption_to_observation(*step, action_table) for step in zip(obs_sample, action_sample, reward_sample, cont_sample)]
-    gt_grid = make_grid(torch.stack(gt_panel))
+    panel = [add_caption_to_observation(*step, action_table) for step in zip(obs_sample, action_sample, reward_sample, cont_sample)]
+    return make_grid(torch.stack(panel))
 
-    pred_panel = [add_caption_to_observation(*step, action_table) for step in zip(obs_pred_sample, action_sample, reward_pred_sample, cont_pred_sample)]
-    pred_grid = make_grid(torch.stack(pred_panel))
-    panel = torch.cat((gt_grid, pred_grid), dim=-1)
+
+def log_nonzero_rewards_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask, sym_exp_on=True, action_table=None):
+    filter = reward.squeeze() != 0.0
+    gt_panel = make_panel(obs, action, reward, cont, mask, filter, sym_exp_on, action_table)
+    pred_panel = make_panel(obs_pred, action, reward_pred, cont_pred, mask, filter, sym_exp_on, action_table)
+    panel = torch.cat((gt_panel, pred_panel), dim=-1)
+    wandb.log({
+        'nonzero_rewards_panel': wandb.Image(panel)
+    })
+
+
+def log_terminal_state_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask, sym_exp_on=True, action_table=None):
+    filter = (cont.squeeze() == 0.0) & mask.squeeze()
+    gt_panel = make_panel(obs, action, reward, cont, mask, filter, sym_exp_on, action_table)
+    pred_panel = make_panel(obs_pred, action, reward_pred, cont_pred, mask, filter, sym_exp_on, action_table)
+    panel = torch.cat((gt_panel, pred_panel), dim=-1)
+    wandb.log({
+        'terminal_state_panel': wandb.Image(panel)
+    })
+
+
+def log_training_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask, sym_exp_on=True, action_table=None):
+
+    filter_mask = torch.full_like(mask[:, :, 0], False, dtype=torch.bool)
+    filter_mask[0:8, 0:8] = True
+
+    gt_panel = make_panel(obs, action, reward, cont, mask, filter_mask, sym_exp_on, action_table)
+    pred_panel = make_panel(obs_pred, action, reward_pred, cont_pred, mask, filter_mask, sym_exp_on, action_table)
+
+    panel = torch.cat((gt_panel, pred_panel), dim=-1)
 
     wandb.log({
         'obs_panel': wandb.Image(panel),
