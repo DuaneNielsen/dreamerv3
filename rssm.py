@@ -28,7 +28,6 @@ import torch
 import torch.nn as nn
 from torch.distributions import OneHotCategorical, Normal, Bernoulli, kl_divergence
 from dists import OneHotCategoricalStraightThru, categorical_kl_divergence_clamped
-from symlog import symlog, symexp
 
 
 class MLPBlock(nn.Module):
@@ -257,13 +256,13 @@ class RSSM(nn.Module):
         """
 
         h_list = [h0]
-        e = self.embedder(x)
-        z_logit_list = [self.encoder(h0, e[0])]
+        embedding = self.embedder(x)
+        z_logit_list = [self.encoder(h0, embedding[0])]
         z_list = [OneHotCategoricalStraightThru(logits=z_logit_list[0]).sample()]
 
         for t in range(1, x.size(0)):
             h_list += [self.seq_model(z_list[t - 1], a[t - 1], h_list[t - 1])]
-            z_logit_list += [self.encoder(h_list[t], e[t])]
+            z_logit_list += [self.encoder(h_list[t], embedding[t])]
             z_list += [OneHotCategoricalStraightThru(logits=z_logit_list[t]).sample()]
 
         h = torch.stack(h_list)
@@ -272,10 +271,10 @@ class RSSM(nn.Module):
 
         x_dist = self.decoder(h, z)
         z_post_logits = self.dynamics_pred(h)
-        r_dist = self.reward_pred(h)
-        c_dist = self.continue_pred(h)
+        reward_symlog_dist = self.reward_pred(h)
+        continue_dist = self.continue_pred(h)
 
-        return x_dist, r_dist, c_dist, z_prior_logits, z_post_logits
+        return x_dist, reward_symlog_dist, continue_dist, z_prior_logits, z_post_logits
 
     def reset(self, N=1, h0=None):
         """
@@ -322,9 +321,9 @@ class RSSM(nn.Module):
 
         self.h = self.seq_model(self.z, a, self.h)
         self.z = OneHotCategorical(logits=self.dynamics_pred(self.h)).sample()
-        r_ = self.reward_pred(self.h).mean
-        c_ = self.continue_pred(self.h).probs
-        return self.h, self.z, symexp(r_), c_
+        reward_symlog = self.reward_pred(self.h).mean
+        cont = self.continue_pred(self.h).probs
+        return self.h, self.z, reward_symlog, cont
 
 
 class RSSMLoss:
@@ -337,7 +336,7 @@ class RSSMLoss:
 
     def __call__(self, obs, reward, cont, mask, obs_dist, reward_dist, cont_dist, z_prior_logits, z_post_logits):
         self.loss_obs = - obs_dist.log_prob(obs).flatten(start_dim=2) * mask
-        self.loss_reward = - reward_dist.log_prob(symlog(reward)) * mask
+        self.loss_reward = - reward_dist.log_prob(reward) * mask
         self.loss_cont = - cont_dist.log_prob(cont) * mask
         self.loss_dyn = 0.5 * categorical_kl_divergence_clamped(z_prior_logits.detach(), z_post_logits) * mask
         self.loss_rep = 0.1 * categorical_kl_divergence_clamped(z_prior_logits, z_post_logits.detach()) * mask

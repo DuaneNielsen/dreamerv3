@@ -1,10 +1,9 @@
 import gymnasium as gym
-import numpy as np
 from minigrid.wrappers import RGBImgObsWrapper
-from replay import sample_batch, Step, get_trajectories, stack_trajectory
+from replay import sample_batch, Step, get_trajectories
 from collections import deque
 from torch.nn.functional import one_hot
-from torchvision.transforms.functional import resize, to_tensor
+from torchvision.transforms.functional import resize
 from rssm import make_small, RSSMLoss
 import torch
 from torch.optim import Adam
@@ -14,8 +13,7 @@ from time import time
 import utils
 import wandb
 from torchvision.utils import make_grid
-from PIL import Image, ImageDraw, ImageFont
-from matplotlib import font_manager
+from wandb_utils import log_loss, log_confusion_and_hist_from_scalars, log_trajectory
 
 
 def prepro(x):
@@ -32,27 +30,6 @@ class RepeatOpenLoopPolicy:
         a = self.actions[self.i]
         self.i = (self.i + 1) % len(self.actions)
         return one_hot(torch.tensor([a]), 4)
-
-
-def log_loss(loss, criterion):
-    wandb.log({
-        'loss': loss.item(),
-        'loss_pred': criterion.loss_obs.item() + criterion.loss_reward.item() + criterion.loss_cont.item(),
-        'loss_dyn': criterion.loss_dyn.item(),
-        'loss_rep': criterion.loss_rep.item()
-    })
-
-
-def log_confusion_and_hist_from_scalars(name, ground_truth, pred, min, max, num_bins):
-    bins = np.linspace(min, max, num_bins)
-    ground_truth_digital = np.digitize(ground_truth, bins=bins, right=True)
-    pred_digital = np.digitize(pred, bins=bins)
-    labels = [f'{b:.2f}' for b in bins] + [f'>{bins[-1]:.2f}']
-    wandb.log({
-        f'{name}_gt': wandb.Histogram(ground_truth, num_bins=num_bins),
-        f'{name}_pred': wandb.Histogram(pred, num_bins=num_bins),
-        f'{name}_confusion': wandb.plot.confusion_matrix(y_true=ground_truth_digital, preds=pred_digital, class_names=labels),
-    })
 
 
 def log(obs, r, c, mask, obs_dist, r_dist, c_dist, z_prior, z_post):
@@ -79,14 +56,6 @@ def log(obs, r, c, mask, obs_dist, r_dist, c_dist, z_prior, z_post):
             f'z_prior': wandb.Histogram(z_prior_argmax),
             f'z_prior_z_post_confusion': wandb.plot.confusion_matrix(y_true=z_prior_argmax, preds=z_post_argmax, class_names=z_labels),
         })
-
-
-def log_confusion_and_hist(name, ground_truth, pred):
-    wandb.log({
-        f'{name}_gt': wandb.Histogram(ground_truth),
-        f'{name}_pred': wandb.Histogram(pred),
-        f'{name}_confusion': wandb.plot.confusion_matrix(y_true=ground_truth, preds=pred),
-    })
 
 
 def random_policy(x):
@@ -118,36 +87,11 @@ def rollout_on_world_model(env, policy):
             x, r, c = env.reset(), [0], [1.0]
 
 
-def make_caption(caption, width, height):
-    img = Image.new('RGB', (width, height))
-    d = ImageDraw.Draw(img)
-    # font = ImageFont.truetype(font_manager.findSystemFonts(fontext='ttf')[0])
-    d.text((1, 5), caption)
-    return to_tensor(img)
-
-
-def log_trajectory(trajectory):
-    with torch.no_grad():
-        obs, action, reward, cont = stack_trajectory(trajectory, pad_action=pad_action.to(rssm.device))
-
-        panel = []
-        for i, o in enumerate(obs.unbind(0)):
-            caption = make_caption(f'{reward[i].item():.2f} {cont[i].item():.2f}', 64, 16)
-            panel += [torch.cat([o, caption.to(o.device)], dim=1)]
-        panel = torch.stack(panel)
-
-        panel = make_grid(panel)
-
-        wandb.log({
-            'imagined_obs': wandb.Image(panel)
-        })
-
-
 def generate_and_log_trajectory_on_world_model(rssm, policy):
     imagination_gen = rollout_on_world_model(rssm, policy)
     imagine_buffer = [next(imagination_gen) for step in range(16)]
     trajectories = get_trajectories(imagine_buffer)
-    log_trajectory(trajectories[0])
+    log_trajectory(trajectories[0], pad_action.to(rssm.device))
 
 
 if __name__ == '__main__':
