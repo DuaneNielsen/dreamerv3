@@ -13,7 +13,7 @@ from time import time
 import utils
 import wandb
 from torchvision.utils import make_grid
-from wandb_utils import log_loss, log_confusion_and_hist_from_scalars, log_trajectory
+from wandb_utils import log_loss, log_confusion_and_hist_from_scalars, log_trajectory, log_training_panel
 
 
 def prepro(x):
@@ -32,8 +32,11 @@ class RepeatOpenLoopPolicy:
         return one_hot(torch.tensor([a]), 4)
 
 
-def log(obs, r, c, mask, obs_dist, r_dist, c_dist, z_prior, z_post):
+def log(obs, action, r, c, mask, obs_dist, r_dist, c_dist, z_prior, z_post):
     with torch.no_grad():
+
+        log_training_panel(obs, action, reward, cont, obs_dist, rew_dist, cont_dist, mask, action_table=action_table)
+
         reward_gt = symexp(r[mask]).flatten().cpu().numpy()
         reward_mean = symexp(r_dist.mean[mask]).flatten().cpu().numpy()
         cont_gt = c[mask].flatten().cpu().numpy()
@@ -41,20 +44,14 @@ def log(obs, r, c, mask, obs_dist, r_dist, c_dist, z_prior, z_post):
         z_prior_argmax, z_post_argmax = z_prior.argmax(-1).flatten().cpu().numpy(), z_post.argmax(
             -1).flatten().cpu().numpy()
 
-        obs_grid = make_grid(symexp(obs[0:8, 0:8] * mask[:, 0:8, None, None]).flatten(0, 1))
-        obs_pred_mean_grid = make_grid(symexp(obs_dist.mean[0:8, 0:8] * mask[0:8, 0:8, None, None]).flatten(0, 1))
-        obs_panel = torch.cat((obs_grid, obs_pred_mean_grid), dim=-1)
-
-        wandb.log({
-            'obs_panel': wandb.Image(obs_panel),
-        })
         log_confusion_and_hist_from_scalars('reward', reward_gt, reward_mean, 0.0, 1.0, 5)
         log_confusion_and_hist_from_scalars('continue', cont_gt, cont_probs, 0.0, 1.0, 5)
         z_labels = [f'{l:02d}' for l in list(range(32))]
         wandb.log({
             f'z_post': wandb.Histogram(z_post_argmax),
             f'z_prior': wandb.Histogram(z_prior_argmax),
-            f'z_prior_z_post_confusion': wandb.plot.confusion_matrix(y_true=z_prior_argmax, preds=z_post_argmax, class_names=z_labels),
+            f'z_prior_z_post_confusion': wandb.plot.confusion_matrix(y_true=z_prior_argmax, preds=z_post_argmax,
+                                                                     class_names=z_labels),
         })
 
 
@@ -91,7 +88,7 @@ def generate_and_log_trajectory_on_world_model(rssm, policy):
     imagination_gen = rollout_on_world_model(rssm, policy)
     imagine_buffer = [next(imagination_gen) for step in range(16)]
     trajectories = get_trajectories(imagine_buffer)
-    log_trajectory(trajectories[0], pad_action.to(rssm.device))
+    log_trajectory(trajectories[0], pad_action.to(rssm.device), action_table=action_table)
 
 
 if __name__ == '__main__':
@@ -105,6 +102,7 @@ if __name__ == '__main__':
     parser.add_argument('--gradient_clipping', type=float, default=1000.)
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--resume', type=str, default=None)
+    parser.add_argument('--log_every_n_steps', type=int, default=200)
     args = parser.parse_args()
 
     wandb.init(project="dreamerv3-minigrid-demo")
@@ -121,15 +119,16 @@ if __name__ == '__main__':
     |    3 | pickup  | Pick up an object |
     +------+---------+-------------------+    
     """
-
+    action_table = {0: 'left', 1: 'right', 2: 'forward', 3: 'pickup'}
     env = gym.make("MiniGrid-Empty-5x5-v0")
     env = RGBImgObsWrapper(env, tile_size=13)
     pad_state = torch.zeros(3, 64, 64, dtype=torch.uint8)
     pad_action = one_hot(torch.tensor([0]), 4)
 
+    policy = random_policy
     buff = deque(maxlen=args.replay_capacity)
-    gen = rollout(env, RepeatOpenLoopPolicy([2, 2, 1, 2, 2]))
-    for i in range(10):
+    gen = rollout(env, policy)
+    for i in range(500):
         buff += [next(gen)]
 
     rssm = make_small(action_classes=4).to(args.device)
@@ -160,17 +159,17 @@ if __name__ == '__main__':
         opt.zero_grad()
         loss.backward()
         opt.step()
+        with torch.no_grad():
+            log_loss(loss, criterion)
+            steps += 1
 
-        log_loss(loss, criterion)
-        steps += 1
+            if steps % args.log_every_n_steps == 0:
+                end_train = time()
+                log(obs, act, reward, cont, mask, obs_dist, rew_dist, cont_dist, z_prior, z_post)
+                utils.save(utils.run.rundir, rssm, opt, args, steps, loss.item())
 
-        if steps % 200 == 0:
-            end_train = time()
-            log(obs, reward, cont, mask, obs_dist, rew_dist, cont_dist, z_prior, z_post)
-            utils.save(utils.run.rundir, rssm, opt, args, steps, loss.item())
+                generate_and_log_trajectory_on_world_model(rssm, policy)
 
-            generate_and_log_trajectory_on_world_model(rssm, RepeatOpenLoopPolicy([2, 2, 1, 2, 2]))
-
-            end_plot = time()
-            print(f'train time: {end_train - start_t} plot time: {end_plot - end_train}')
-            start_t = time()
+                end_plot = time()
+                print(f'train time: {end_train - start_t} plot time: {end_plot - end_train}')
+                start_t = time()

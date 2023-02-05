@@ -45,23 +45,62 @@ def make_caption(caption, width, height):
     return to_tensor(img)
 
 
-def log_trajectory(trajectory, pad_action, symexp_on=True):
+def add_caption_to_observation(obs, action, reward, cont, action_table):
+    if action_table:
+        top_caption = make_caption(f'{action_table[action.argmax().item()]}', 64, 16).to(obs.device)
+    else:
+        top_caption = make_caption(f'{action.argmax().item()}', 64, 16).to(obs.device)
+    bottom_caption = make_caption(f'{reward.item():.2f} {cont.item():.2f}', 64, 16).to(obs.device)
+    return torch.cat([top_caption, obs, bottom_caption], dim=1)
+
+
+def log_trajectory(trajectory, pad_action, symexp_on=True, action_table=None):
     with torch.no_grad():
         obs, action, reward, cont = stack_trajectory(trajectory, pad_action=pad_action)
         if symexp_on:
             obs = symexp(obs)
+            reward = symexp(reward)
 
-        panel = []
-        for i, o in enumerate(obs.unbind(0)):
-            if symexp_on:
-                caption = make_caption(f'{symexp(reward[i]).item():.2f} {cont[i].item():.2f}', 64, 16)
-            else:
-                caption = make_caption(f'{reward[i].item():.2f} {cont[i].item():.2f}', 64, 16)
-            panel += [torch.cat([o, caption.to(o.device)], dim=1)]
+        panel = [add_caption_to_observation(*step, action_table=action_table) for step in zip(obs, action, reward, cont)]
         panel = torch.stack(panel)
-
         panel = make_grid(panel)
 
         wandb.log({
             'imagined_obs': wandb.Image(panel)
         })
+
+
+def log_training_panel(obs, action, reward, cont, obs_dist, reward_dist, cont_dist, mask, sym_exp_on=True, action_table=None):
+
+    obs_sample = obs[0:8, 0:8] * mask[0:8, 0:8, None, None]
+    action_sample = action[0:8, 0:8] * mask[0:8, 0:8, None]
+    reward_sample = reward[0:8, 0:8] * mask[0:8, 0:8]
+    cont_sample = cont[0:8, 0:8] * mask[0:8, 0:8]
+
+    obs_pred_sample = obs_dist.mean[0:8, 0:8] * mask[0:8, 0:8, None, None]
+    reward_pred_sample = reward_dist.mean[0:8, 0:8] * mask[0:8, 0:8]
+    cont_pred_sample = cont_dist.probs[0:8, 0:8] * mask[0:8, 0:8]
+
+    obs_sample = obs_sample.flatten(0, 1)
+    action_sample = action_sample.flatten(0, 1)
+    reward_sample = reward_sample.flatten(0, 1)
+    cont_sample = cont_sample.flatten(0, 1)
+
+    obs_pred_sample = obs_pred_sample.flatten(0, 1)
+    reward_pred_sample = reward_pred_sample.flatten(0, 1)
+    cont_pred_sample = cont_pred_sample.flatten(0, 1)
+
+    if sym_exp_on:
+        obs_sample, obs_pred_sample = symexp(obs_sample), symexp(obs_pred_sample)
+        reward_sample, reward_pred_sample = symexp(reward_sample), symexp(reward_pred_sample)
+
+    gt_panel = [add_caption_to_observation(*step, action_table) for step in zip(obs_sample, action_sample, reward_sample, cont_sample)]
+    gt_grid = make_grid(torch.stack(gt_panel))
+
+    pred_panel = [add_caption_to_observation(*step, action_table) for step in zip(obs_pred_sample, action_sample, reward_pred_sample, cont_pred_sample)]
+    pred_grid = make_grid(torch.stack(pred_panel))
+    panel = torch.cat((gt_grid, pred_grid), dim=-1)
+
+    wandb.log({
+        'obs_panel': wandb.Image(panel),
+    })
