@@ -31,7 +31,7 @@ class RepeatOpenLoopPolicy:
         return one_hot(torch.tensor([a]), 4)
 
 
-def log(obs, action, r, c, mask, obs_dist, r_dist, c_dist, z_prior, z_post):
+def log(obs, action, r, c, mask, obs_dist, r_dist, c_dist, z_prior, z_post, step):
     with torch.no_grad():
         batch_panel, rewards_panel, terminal_panel = \
             make_batch_panels(obs, action, reward, cont, obs_dist.mean,
@@ -71,17 +71,17 @@ def log(obs, action, r, c, mask, obs_dist, r_dist, c_dist, z_prior, z_post):
             'z_prior': wandb.Histogram(z_prior_argmax),
             'z_prior_z_post_confusion': wandb.plot.confusion_matrix(y_true=z_prior_argmax, preds=z_post_argmax,
                                                                     class_names=z_labels),
-        })
+        }, step=step)
 
 
-def generate_and_log_trajectory_on_world_model(rssm, policy):
+def generate_and_log_trajectory_on_world_model(rssm, policy, step):
     imagination_gen = rollout_on_world_model(rssm, policy)
     imagine_buffer = [next(imagination_gen) for step in range(16)]
     trajectories = get_trajectories(imagine_buffer)
     panel = make_trajectory_panel(trajectories[0], pad_action.to(rssm.device), action_table=action_table)
     wandb.log({
         'imagined_obs': wandb.Image(panel)
-    })
+    }, step=step)
 
 
 def random_policy(x):
@@ -181,16 +181,17 @@ if __name__ == '__main__':
         opt.zero_grad()
         loss.backward()
         opt.step()
+
         with torch.no_grad():
-            wandb.log(criterion.loss_dict())
+            wandb.log(criterion.loss_dict(), step=steps)
             steps += 1
 
             if steps % args.log_every_n_steps == 0:
                 end_train = time()
-                log(obs, act, reward, cont, mask, obs_dist, rew_dist, cont_dist, z_prior, z_post)
+                log(obs, act, reward, cont, mask, obs_dist, rew_dist, cont_dist, z_prior, z_post, steps)
                 utils.save(utils.run.rundir, rssm, opt, args, steps, loss.item())
 
-                generate_and_log_trajectory_on_world_model(rssm, policy)
+                generate_and_log_trajectory_on_world_model(rssm, policy, steps)
 
                 end_plot = time()
                 print(f'step: {steps} train time: {end_train - start_t} plot time: {end_plot - end_train}')
