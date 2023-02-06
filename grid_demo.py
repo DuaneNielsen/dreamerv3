@@ -12,9 +12,7 @@ from symlog import symlog, symexp
 from time import time
 import utils
 import wandb
-from torchvision.utils import make_grid
-from wandb_utils import log_loss, log_confusion_and_hist_from_scalars, log_trajectory, log_training_panel, \
-    log_nonzero_rewards_panel, log_terminal_state_panel
+from viz import make_trajectory_panel, make_batch_panels
 
 
 def prepro(x):
@@ -35,27 +33,55 @@ class RepeatOpenLoopPolicy:
 
 def log(obs, action, r, c, mask, obs_dist, r_dist, c_dist, z_prior, z_post):
     with torch.no_grad():
+        batch_panel, rewards_panel, terminal_panel = \
+            make_batch_panels(obs, action, reward, cont, obs_dist.mean,
+                              r_dist.mean, c_dist.probs, mask,
+                              sym_exp_on=True,
+                              action_table=action_table)
 
-        log_training_panel(obs, action, reward, cont, obs_dist.mean, r_dist.mean, c_dist.probs, mask, action_table=action_table)
-        log_nonzero_rewards_panel(obs, action, reward, cont, obs_dist.mean, r_dist.mean, c_dist.probs, mask, action_table=action_table)
-        log_terminal_state_panel(obs, action, reward, cont, obs_dist.mean, r_dist.mean, c_dist.probs, mask, action_table=action_table)
+        class_labels = utils.bin_labels(0., 1., num_bins=5)
+        reward_gt = symexp(r[mask]).flatten().cpu()
+        reward_mean = symexp(r_dist.mean[mask]).flatten().cpu()
+        reward_gt_binned = utils.bin_values(reward_gt, 0., 1., num_bins=5).numpy()
+        reward_mean_binned = utils.bin_values(reward_mean, 0., 1., num_bins=5).numpy()
+        cont_gt = c[mask].flatten().cpu()
+        cont_probs = c_dist.probs[mask].flatten().cpu()
+        cont_gt_binned = utils.bin_values(cont_gt, 0., 1., 5).numpy()
+        cont_probs_binned = utils.bin_values(cont_probs, 0., 1., 5).numpy()
 
-        reward_gt = symexp(r[mask]).flatten().cpu().numpy()
-        reward_mean = symexp(r_dist.mean[mask]).flatten().cpu().numpy()
-        cont_gt = c[mask].flatten().cpu().numpy()
-        cont_probs = c_dist.probs[mask].flatten().cpu().numpy()
         z_prior_argmax, z_post_argmax = z_prior.argmax(-1).flatten().cpu().numpy(), z_post.argmax(
             -1).flatten().cpu().numpy()
-
-        log_confusion_and_hist_from_scalars('reward', reward_gt, reward_mean, 0.0, 1.0, 5)
-        log_confusion_and_hist_from_scalars('continue', cont_gt, cont_probs, 0.0, 1.0, 5)
         z_labels = [f'{l:02d}' for l in list(range(32))]
+
         wandb.log({
-            f'z_post': wandb.Histogram(z_post_argmax),
-            f'z_prior': wandb.Histogram(z_prior_argmax),
-            f'z_prior_z_post_confusion': wandb.plot.confusion_matrix(y_true=z_prior_argmax, preds=z_post_argmax,
-                                                                     class_names=z_labels),
+            'batch_panel': wandb.Image(batch_panel),
+            'nonzero_rewards_panel': wandb.Image(rewards_panel),
+            'terminal_state_panel': wandb.Image(terminal_panel),
+            'reward_gt': wandb.Histogram(reward_gt, num_bins=5),
+            'reward_pred': wandb.Histogram(reward_mean, num_bins=5),
+            'reward_confusion': wandb.plot.confusion_matrix(y_true=reward_gt_binned,
+                                                            preds=reward_mean_binned,
+                                                            class_names=class_labels),
+            'cont_gt': wandb.Histogram(cont_gt, num_bins=5),
+            'cont_probs': wandb.Histogram(cont_probs, num_bins=5),
+            'cont_confusion': wandb.plot.confusion_matrix(y_true=cont_gt_binned,
+                                                          preds=cont_probs_binned,
+                                                          class_names=class_labels),
+            'z_post': wandb.Histogram(z_post_argmax),
+            'z_prior': wandb.Histogram(z_prior_argmax),
+            'z_prior_z_post_confusion': wandb.plot.confusion_matrix(y_true=z_prior_argmax, preds=z_post_argmax,
+                                                                    class_names=z_labels),
         })
+
+
+def generate_and_log_trajectory_on_world_model(rssm, policy):
+    imagination_gen = rollout_on_world_model(rssm, policy)
+    imagine_buffer = [next(imagination_gen) for step in range(16)]
+    trajectories = get_trajectories(imagine_buffer)
+    panel = make_trajectory_panel(trajectories[0], pad_action.to(rssm.device), action_table=action_table)
+    wandb.log({
+        'imagined_obs': wandb.Image(panel)
+    })
 
 
 def random_policy(x):
@@ -85,13 +111,6 @@ def rollout_on_world_model(env, policy):
         if c[0] < 0.5:
             yield Step(x[0], None, r[0], c[0])
             x, r, c = env.reset(), [0], [1.0]
-
-
-def generate_and_log_trajectory_on_world_model(rssm, policy):
-    imagination_gen = rollout_on_world_model(rssm, policy)
-    imagine_buffer = [next(imagination_gen) for step in range(16)]
-    trajectories = get_trajectories(imagine_buffer)
-    log_trajectory(trajectories[0], pad_action.to(rssm.device), action_table=action_table)
 
 
 if __name__ == '__main__':
@@ -163,7 +182,7 @@ if __name__ == '__main__':
         loss.backward()
         opt.step()
         with torch.no_grad():
-            log_loss(loss, criterion)
+            wandb.log(criterion.loss_dict())
             steps += 1
 
             if steps % args.log_every_n_steps == 0:
@@ -174,5 +193,5 @@ if __name__ == '__main__':
                 generate_and_log_trajectory_on_world_model(rssm, policy)
 
                 end_plot = time()
-                print(f'train time: {end_train - start_t} plot time: {end_plot - end_train}')
+                print(f'step: {steps} train time: {end_train - start_t} plot time: {end_plot - end_train}')
                 start_t = time()

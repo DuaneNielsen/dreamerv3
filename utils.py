@@ -29,6 +29,7 @@ with Path('runs/.runs').open('wb') as f:
     pickle.dump(run, f)
 print(f"starting run {run.run_id}")
 
+
 def save(rundir, rssm, optimizer, args, steps, loss):
     torch.save({
         'rssm_state_dict': rssm.state_dict(),
@@ -47,6 +48,21 @@ def load(rundir, rssm, optimizer):
     steps = checkpoint['steps']
     loss = checkpoint['loss']
     return rssm, optimizer, steps, args, loss
+
+
+def bin_values(values, min, max, num_bins):
+    values = values.clamp(min=min, max=max) - min
+    values = values / max
+    values = values * (num_bins - 1)
+    return values.round().to(dtype=torch.long)
+
+
+def bin_labels(min, max, num_bins):
+    bins = torch.linspace(min, max, num_bins+1)
+    labels = []
+    for i in range(1, num_bins+1):
+        labels += [f'{bins[i-1]:.2f}-{bins[i]:.2f}']
+    return labels
 
 
 if __name__ == '__main__':

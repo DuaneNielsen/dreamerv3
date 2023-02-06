@@ -2,7 +2,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 from collections import deque
 import torch
+from PIL import Image, ImageDraw
 from torch.nn.functional import conv1d
+from torchvision.transforms.functional import to_tensor
+from torchvision.utils import make_grid
+
+from replay import stack_trajectory
+from symlog import symexp
 
 """
 https://matplotlib.org/stable/gallery/lines_bars_and_markers/scatter_hist.html#sphx-glr-gallery-lines-bars-and-markers-scatter-hist-py
@@ -90,6 +96,81 @@ class PlotImage:
             self.image = self.ax.imshow(image)
         else:
             self.image.set_data(image)
+
+
+def make_caption(caption, width, height):
+    img = Image.new('RGB', (width, height))
+    d = ImageDraw.Draw(img)
+    d.text((1, 5), caption)
+    return to_tensor(img)
+
+
+def add_caption_to_observation(obs, action, reward, cont, action_table):
+    if action_table:
+        top_caption = make_caption(f'{action_table[action.argmax().item()]}', 64, 16).to(obs.device)
+    else:
+        top_caption = make_caption(f'{action.argmax().item()}', 64, 16).to(obs.device)
+    bottom_caption = make_caption(f'{reward.item():.2f} {cont.item():.2f}', 64, 16).to(obs.device)
+    return torch.cat([top_caption, obs, bottom_caption], dim=1)
+
+
+def make_trajectory_panel(trajectory, pad_action, symexp_on=True, action_table=None):
+    obs, action, reward, cont = stack_trajectory(trajectory, pad_action=pad_action)
+    if symexp_on:
+        obs = symexp(obs)
+        reward = symexp(reward)
+
+    panel = [add_caption_to_observation(*step, action_table=action_table) for step in zip(obs, action, reward, cont)]
+    panel = torch.stack(panel)
+    return make_grid(panel)
+
+
+def make_panel(obs, action, reward, cont, mask, filter_mask=None, sym_exp_on=True, action_table=None):
+    """
+    obs: observations [..., C, H, W]
+    action: discrete action [..., AD, AC]
+    reward: rewards [..., 1]
+    cont: continue [..., 1]
+    filter_mask: booleans, filter results in panel [...]
+    sym_exp_on: obs and rewards are read out in sym_exp
+    action_table: {0: "action1", 1:{action2}... etc}
+    """
+
+    if filter_mask is None:
+        filter_mask = torch.full_like(mask.unsqueeze(-1), True, dtype=torch.bool)
+
+    obs_sample = obs[filter_mask] * mask[filter_mask][..., None, None]
+    action_sample = action[filter_mask] * mask[filter_mask][..., None]
+    reward_sample = reward[filter_mask] * mask[filter_mask]
+    cont_sample = cont[filter_mask] * mask[filter_mask]
+
+    if sym_exp_on:
+        obs_sample = symexp(obs_sample)
+        reward_sample = symexp(reward_sample)
+
+    panel = [add_caption_to_observation(*step, action_table) for step in zip(obs_sample, action_sample, reward_sample, cont_sample)]
+    return make_grid(torch.stack(panel))
+
+
+def make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask, filter_mask=None, sym_exp_on=True, action_table=None):
+    gt_panel = make_panel(obs, action, reward, cont, mask, filter_mask, sym_exp_on, action_table)
+    pred_panel = make_panel(obs_pred, action, reward_pred, cont_pred, mask, filter_mask, sym_exp_on, action_table)
+    return torch.cat((gt_panel, pred_panel), dim=-1)
+
+
+def make_batch_panels(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask, sym_exp_on=True, action_table=None):
+
+    batch_filter_mask = torch.full_like(mask[:, :, 0], False, dtype=torch.bool)
+    batch_filter_mask[0:8, 0:8] = True
+    batch_panel = make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask, batch_filter_mask, sym_exp_on, action_table)
+
+    rewards_filter = reward.squeeze() != 0.0
+    rewards_panel = make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask, rewards_filter, sym_exp_on, action_table)
+
+    terminal_filter = (cont.squeeze() == 0.0) & mask.squeeze()
+    terminal_panel = make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask, terminal_filter, sym_exp_on, action_table)
+
+    return batch_panel, rewards_panel, terminal_panel
 
 
 if __name__ == '__main__':

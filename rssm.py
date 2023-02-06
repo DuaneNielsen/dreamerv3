@@ -333,6 +333,7 @@ class RSSMLoss:
         self.loss_cont = None
         self.loss_dyn = None
         self.loss_rep = None
+        self.loss = None
 
     def __call__(self, obs, reward, cont, mask, obs_dist, reward_dist, cont_dist, z_prior_logits, z_post_logits):
         self.loss_obs = - obs_dist.log_prob(obs).flatten(start_dim=2) * mask
@@ -345,7 +346,16 @@ class RSSMLoss:
         self.loss_cont = self.loss_cont.mean()
         self.loss_dyn = self.loss_dyn.mean()
         self.loss_rep = self.loss_rep.mean()
-        return self.loss_obs + self.loss_reward + self.loss_cont + self.loss_dyn + self.loss_rep
+        self.loss = self.loss_obs + self.loss_reward + self.loss_cont + self.loss_dyn + self.loss_rep
+        return self.loss
+
+    def loss_dict(self):
+        return {
+            'loss': self.loss.item(),
+            'loss_pred': self.loss_obs.item() + self.loss_reward.item() + self.loss_cont.item(),
+            'loss_dyn': self.loss_dyn.item(),
+            'loss_rep': self.loss_rep.item()
+        }
 
 
 def make_small(action_classes, in_channels=3):
