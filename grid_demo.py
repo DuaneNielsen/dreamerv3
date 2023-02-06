@@ -15,22 +15,6 @@ import wandb
 from viz import make_trajectory_panel, make_batch_panels
 
 
-def prepro(x):
-    x = torch.from_numpy(x['image']).permute(2, 0, 1).float() / 255.0
-    return resize(x, [64, 64])
-
-
-class RepeatOpenLoopPolicy:
-    def __init__(self, actions):
-        self.i = 0
-        self.actions = actions
-
-    def __call__(self, x):
-        a = self.actions[self.i]
-        self.i = (self.i + 1) % len(self.actions)
-        return one_hot(torch.tensor([a]), 4)
-
-
 def log(obs, action, r, c, mask, obs_dist, r_dist, c_dist, z_prior, z_post, step):
     with torch.no_grad():
         batch_panel, rewards_panel, terminal_panel = \
@@ -82,6 +66,22 @@ def generate_and_log_trajectory_on_world_model(rssm, policy, step):
     wandb.log({
         'imagined_obs': wandb.Image(panel)
     }, step=step)
+
+
+def prepro(x):
+    x = torch.from_numpy(x['image']).permute(2, 0, 1).float() / 255.0
+    return resize(x, [64, 64])
+
+
+class RepeatOpenLoopPolicy:
+    def __init__(self, actions):
+        self.i = 0
+        self.actions = actions
+
+    def __call__(self, x):
+        a = self.actions[self.i]
+        self.i = (self.i + 1) % len(self.actions)
+        return one_hot(torch.tensor([a]), 4)
 
 
 def random_policy(x):
