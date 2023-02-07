@@ -52,9 +52,9 @@ def load(rundir, rssm, optimizer):
 
 def bin_values(values, min, max, num_bins):
     values = values.clamp(min=min, max=max) - min
-    values = values / max
+    values = values / (max - min)
     values = values * (num_bins - 1)
-    return values.round().to(dtype=torch.long)
+    return values.round().long()
 
 
 def bin_labels(min, max, num_bins):
