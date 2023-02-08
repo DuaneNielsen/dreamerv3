@@ -26,21 +26,9 @@
 
 import torch
 import torch.nn as nn
-from torch.distributions import OneHotCategorical, Normal, Bernoulli, kl_divergence
+from torch.distributions import OneHotCategorical, Normal, Bernoulli
 from dists import OneHotCategoricalStraightThru, categorical_kl_divergence_clamped
-
-
-class MLPBlock(nn.Module):
-    def __init__(self, in_features, out_features):
-        super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(in_features, out_features),
-            nn.LayerNorm([out_features]),
-            nn.SiLU()
-        )
-
-    def forward(self, x):
-        return self.mlp(x)
+from blocks import MLPBlock
 
 
 class EncoderConvBlock(nn.Module):
@@ -92,6 +80,8 @@ class Embedder(nn.Module):
         )
 
     def forward(self, x):
+        if len(x.shape) == 4:
+            x = x.unsqueeze(0)
         T, N, C, H, W = x.shape
         return self.embedder(x.flatten(start_dim=0, end_dim=1)).unflatten(0, (T, N))
 
@@ -142,7 +132,7 @@ class DynamicsPredictor(nn.Module):
         super().__init__()
         self.dynamics_predictor = nn.Sequential(
             MLPBlock(h_size, mlp_size),
-            *[MLPBlock(mlp_size, mlp_size) for _ in range(mlp_layers-1)],
+            *[MLPBlock(mlp_size, mlp_size) for _ in range(mlp_layers - 1)],
             nn.Linear(mlp_size, z_size * z_cls, bias=False)
         )
         self.z_size = z_size
@@ -158,7 +148,7 @@ class RewardPredictor(nn.Module):
         super().__init__()
         self.reward_predictor = nn.Sequential(
             MLPBlock(h_size, mlp_size),
-            *[MLPBlock(mlp_size, mlp_size) for _ in range(mlp_layers-1)],
+            *[MLPBlock(mlp_size, mlp_size) for _ in range(mlp_layers - 1)],
             nn.Linear(mlp_size, 1, bias=False)
         )
 
@@ -171,7 +161,7 @@ class ContinuePredictor(nn.Module):
         super().__init__()
         self.continue_predictor = nn.Sequential(
             MLPBlock(h_size, mlp_size),
-            *[MLPBlock(mlp_size, mlp_size) for _ in range(mlp_layers-1)],
+            *[MLPBlock(mlp_size, mlp_size) for _ in range(mlp_layers - 1)],
             nn.Linear(mlp_size, 1, bias=False)
         )
 
@@ -276,14 +266,18 @@ class RSSM(nn.Module):
 
         return x_dist, reward_symlog_dist, continue_dist, z_prior_logits, z_post_logits
 
-    def reset(self, N=1, h0=None):
+    def reset(self, N=1, h0=None, x=None):
         """
         Reset the environment to start state
         :param N : batch size for simulation, default 1, ignored if h0 is used
         :param h0: [N, h_size ] : hidden variable to initialize environment, zero if None
         """
         self.h = h0 if h0 is not None else torch.zeros(N, self.h_size, device=self.device)
-        self.z = OneHotCategorical(logits=self.dynamics_pred(self.h)).sample()
+        if x is not None:
+            embed = self.embedder(x)
+            self.z = self.encoder(h0, embed[0])
+        else:
+            self.z = OneHotCategorical(logits=self.dynamics_pred(self.h)).sample()
         return self.h, self.z
 
     def step(self, a):
@@ -321,9 +315,45 @@ class RSSM(nn.Module):
 
         self.h = self.seq_model(self.z, a, self.h)
         self.z = OneHotCategorical(logits=self.dynamics_pred(self.h)).sample()
-        reward_symlog = self.reward_pred(self.h).mean
+        reward = self.reward_pred(self.h).mean
         cont = self.continue_pred(self.h).probs
-        return self.h, self.z, reward_symlog, cont
+        return self.h, self.z, reward, cont
+
+    def imagine(self, h0, obs, reward, cont, policy, imagination_horizon=15):
+        """
+        runs a policy on the model from the provided start states
+        :param h0: [N, hdim]
+        :param obs: [N, C, H, W] starting observation
+        :param reward: [N, 1] rewards
+        :param cont: [N, 1] continue
+        :param policy: a = policy(h, z)
+        :param imagination_horizon: steps to project using the model, default 15
+        :return: h [H, N, h_size], z [H, N, z_size, z_classes], a [H, N, a_size, a_classes],
+        reward [H, N, 1], continue [H, N, 1]
+        where H = imagination_horizon + 1
+        """
+
+        (h, z), r, c = self.reset(h0=h0, x=obs[0]), reward[0], cont[0]
+        a = policy(h, z)
+
+        h_list, z_list, a_list, reward_list, cont_list = [h], [z], [a], [r], [c]
+
+        for t in range(imagination_horizon):
+            h, z, reward, cont = self.step(a)
+            a = policy(h, z)
+
+            h_list += [h]
+            z_list += [z]
+            a_list += [a]
+            reward_list += [reward]
+            cont_list += [cont]
+
+        h = torch.stack(h_list)
+        z = torch.stack(z_list)
+        a = torch.stack(a_list)
+        reward = torch.stack(reward_list)
+        cont = torch.stack(cont_list)
+        return h, z, a, reward, cont
 
 
 class RSSMLoss:
