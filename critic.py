@@ -3,7 +3,10 @@ import torch.nn as nn
 from torch.nn.functional import one_hot, mse_loss
 from torch.optim import Adam
 from copy import deepcopy
-from blocks import MLPBlock
+from blocks import MLPBlock, Embedder
+from torchvision.transforms.functional import resize
+from viz import make_panel
+from matplotlib import pyplot as plt
 
 
 class Critic(nn.Module):
@@ -75,9 +78,24 @@ if __name__ == '__main__':
 
     from replay import sample_batch, Step
     from env import Env
-
-    env = Env()
+    import gymnasium as gym
+    from gymnasium import RewardWrapper
+    import random
+    from minigrid.wrappers import FlatObsWrapper, RGBImgObsWrapper
+    # env = Env()
     buff = []
+
+    env = gym.make("MiniGrid-Empty-5x5-v0")
+    env = RGBImgObsWrapper(env)
+
+    class RewardOneOrZeroOnlyWrapper(RewardWrapper):
+        def __init__(self, env):
+            super().__init__(env)
+
+        def reward(self, reward):
+            return 0. if reward == 0. else 1.
+
+    env = RewardOneOrZeroOnlyWrapper(env)
 
     def rollout_open_loop_policy(env, actions):
         x, r, c = env.reset(), 0, 1.0
@@ -87,31 +105,52 @@ if __name__ == '__main__':
             c = 0.0 if done else 1.0
         yield Step(x, None, r, c)
 
+    def prepro(x):
+        x = torch.from_numpy(x['image']).permute(2, 0, 1).float() / 255.0
+        return resize(x, [64, 64])
 
-    go_right = [Env.right] * 8
-    go_left = [Env.left]
+    def prepro_action(a):
+        return one_hot(torch.tensor([a]), 4)
 
-    for step in rollout_open_loop_policy(env, go_right):
-        buff.append(step)
+    def rollout_random_policy(env):
+        (x, _), r, c = env.reset(), 0, 1.0
+        truncated = False
+        while c == 1.0 and not truncated:
+            a = random.randint(0, 3)
+            yield Step(prepro(x), prepro_action(a), r, c)
+            x, r, done, truncated, _ = env.step(a)
+            c = 0.0 if done else 1.0
+        yield Step(prepro(x), None, r, c)
 
-    critic = Critic(h_size=10)
+
+    for _ in range(500):
+        for step in rollout_random_policy(env):
+            buff.append(step)
+
+    pad_state = torch.zeros(3, 64, 64, dtype=torch.uint8)
+    pad_action = one_hot(torch.tensor([0]), 4)
+
+    embedder = Embedder()
+    critic = Critic(h_size=4096, z_size=1, z_classes=1)
     ema_critic = deepcopy(critic)
 
-    random_noise = torch.randn(1, 10)
-    assert torch.allclose(critic(random_noise), ema_critic(random_noise))
+    # random_noise = torch.randn(1, 10)
+    # assert torch.allclose(critic(random_noise), ema_critic(random_noise))
 
     opt = Adam(critic.parameters(), lr=1e-2)
 
-    for step in range(2000):
-        obs, act, reward, cont, mask = sample_batch(buff, 10, 4, Env.pad_state, Env.pad_action)
-        obs = obs[:, 0]
-        act = act[:, 0]
-        reward = reward[:, 0]
-        cont = cont[:, 0]
+    drawn = None
+    for step in range(20000):
+        obs, act, reward, cont, mask = sample_batch(buff, 10, 4, pad_state, pad_action)
+        z = torch.zeros(obs.shape[0], obs.shape[1], 1, 1)
 
-        values = ema_critic(obs)
-        value_targets = td_lambda(reward, cont, values)
-        loss = mse_loss(critic(obs), value_targets)
+        embed = embedder(obs)
+        ema_values = ema_critic(embed, z)
+        value_targets = td_lambda(reward, cont, ema_values)
+        critic_values = critic(embed, z)
+        loss = 0.5 * ( critic_values - value_targets) ** 2
+        loss = loss * mask
+        loss = loss.mean()
         opt.zero_grad()
         loss.backward()
         opt.step()
@@ -119,6 +158,15 @@ if __name__ == '__main__':
         polyak_update(critic, ema_critic)
 
         if step % 10 == 0:
-            value = monte_carlo(reward)
-            print(value.T)
-            print(critic(obs).T)
+            panel = make_panel(obs, act, reward, cont, mask, critic_values, symexp_on=False)
+            if drawn:
+                drawn.set_data(panel.permute(1, 2, 0))
+            else:
+                drawn = plt.imshow(panel.permute(1, 2, 0))
+            plt.pause(0.01)
+
+
+        # if step % 10 == 0:
+        #     value = monte_carlo(reward)
+        #     print(value.T)
+        #     print(critic(obs, z).T)

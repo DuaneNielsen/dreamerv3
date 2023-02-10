@@ -1,4 +1,5 @@
 import gymnasium as gym
+from gymnasium import RewardWrapper
 from minigrid.wrappers import RGBImgObsWrapper
 from replay import sample_batch, Step, get_trajectories
 from collections import deque
@@ -14,7 +15,7 @@ from time import time
 import copy
 import utils
 import wandb
-from viz import make_trajectory_panel, make_batch_panels
+from viz import make_trajectory_panel, make_batch_panels, make_panel
 
 
 def log(obs, action, r, c, mask, obs_dist, r_dist, c_dist, z_prior, z_post, step):
@@ -22,7 +23,7 @@ def log(obs, action, r, c, mask, obs_dist, r_dist, c_dist, z_prior, z_post, step
         batch_panel, rewards_panel, terminal_panel = \
             make_batch_panels(obs, action, reward, cont, obs_dist.mean,
                               r_dist.mean, c_dist.probs, mask,
-                              sym_exp_on=True,
+                              symexp_on=True,
                               action_table=action_table)
 
         class_labels = utils.bin_labels(0., 1., num_bins=5)
@@ -155,6 +156,16 @@ if __name__ == '__main__':
     action_table = {0: 'left', 1: 'right', 2: 'forward', 3: 'pickup'}
     env = gym.make("MiniGrid-Empty-5x5-v0")
     env = RGBImgObsWrapper(env, tile_size=13)
+
+    class RewardOneOrZeroOnlyWrapper(RewardWrapper):
+        def __init__(self, env):
+            super().__init__(env)
+
+        def reward(self, reward):
+            return 0. if reward == 0. else 1.
+
+    env = RewardOneOrZeroOnlyWrapper(env)
+
     pad_state = torch.zeros(3, 64, 64, dtype=torch.uint8)
     pad_action = one_hot(torch.tensor([0]), 4)
 
@@ -178,13 +189,18 @@ if __name__ == '__main__':
         p.register_hook(lambda grad: torch.clamp(grad, -args.actor_critic_gradient_clipping, args.actor_critic_gradient_clipping))
 
     steps = 0
+    training_time = utils.StopWatch()
+    logging_time = utils.StopWatch()
+
     if args.resume:
         rssm, rssm_opt, steps, resume_args, loss = utils.load(args.resume, rssm, rssm_opt)
         print(f'resuming from step {steps} of {args.resume} with {resume_args}')
 
-    start_t = time()
     while True:
 
+        training_time.go()
+
+        # sample batch from replay buffer
         buff += [next(gen)]
         obs, act, reward, cont, mask = sample_batch(buff, args.batch_length, args.batch_size, pad_state, pad_action)
         obs, act, reward, cont, mask = obs.to(args.device), act.to(args.device), reward.to(args.device), cont.to(
@@ -192,6 +208,7 @@ if __name__ == '__main__':
         obs = symlog(obs)
         reward = symlog(reward)
 
+        # train world model
         h0 = torch.zeros(args.batch_size, rssm.h_size, device=args.device)
         obs_dist, rew_dist, cont_dist, z_prior, z_post = rssm(obs, act, h0)
         loss = criterion(obs, reward, cont, mask, obs_dist, rew_dist, cont_dist, z_prior, z_post)
@@ -200,32 +217,54 @@ if __name__ == '__main__':
         loss.backward()
         rssm_opt.step()
 
+        training_time.pause()
+
+        with torch.no_grad():
+            wandb.log(criterion.loss_dict(), step=steps)
+
+            if steps % args.log_every_n_steps == 0:
+
+                logging_time.go()
+                log(obs, act, reward, cont, mask, obs_dist, rew_dist, cont_dist, z_prior, z_post, steps)
+                utils.save(utils.run.rundir, rssm, rssm_opt, args, steps, loss.item())
+                logging_time.pause()
+
+        training_time.go()
+
+        # sample 1 step from replay buffer and imagine trajectory under policy
         obs, act, reward, cont, mask = sample_batch(buff, 1, args.batch_size, pad_state, pad_action)
-        obs, reward, cont = obs.to(args.device), reward.to(args.device), cont.to(args.device)
+        obs, reward, cont, mask = obs.to(args.device), reward.to(args.device), cont.to(args.device), mask.to(args.device)
         h0 = torch.zeros(args.batch_size, rssm.h_size, device=args.device)
 
         h, z, a, reward_symlog, cont = rssm.imagine(h0, obs, reward, cont, random_policy_for_world_model,
                                                     imagination_horizon=args.imagination_horizon)
 
+        # compute values based on imagined trajectory and update critic
         values = ema_critic(h, z)
         value_targets = td_lambda(reward_symlog, cont, values)
-        critic_loss = mse_loss(critic(h, z), value_targets)
+        values_pred = critic(h, z)
+        critic_loss = mse_loss(values_pred, value_targets)
         ac_opt.zero_grad()
         critic_loss.backward()
+        ac_opt.step()
         polyak_update(critic, ema_critic)
 
+        training_time.pause()
+
         with torch.no_grad():
-            wandb.log(criterion.loss_dict(), step=steps)
             wandb.log({'critic_loss': critic_loss.item()}, step=steps)
-            steps += 1
-
             if steps % args.log_every_n_steps == 0:
-                end_train = time()
-                log(obs, act, reward, cont, mask, obs_dist, rew_dist, cont_dist, z_prior, z_post, steps)
-                utils.save(utils.run.rundir, rssm, rssm_opt, args, steps, loss.item())
+                logging_time.go()
 
-                generate_and_log_trajectory_on_world_model(rssm, policy, steps)
+                decoded_obs = rssm.decoder(h, z).mean
+                mask = mask.repeat(1 + args.imagination_horizon, 1, 1)
+                imagination_panel = make_panel(decoded_obs[:, 0:2], a[:, 0:2], reward_symlog[:, 0:2], cont[:, 0:2],
+                                               mask[:, 0:2], values_pred[:, 0:2], action_table=action_table, nrow=16)
+                wandb.log({'imagination_panel': wandb.Image(imagination_panel)}, step=steps)
 
-                end_plot = time()
-                print(f'step: {steps} train time: {end_train - start_t} plot time: {end_plot - end_train}')
-                start_t = time()
+                logging_time.pause()
+                print(f'logged step {steps} training_time {training_time.total_time} logging_time {logging_time.total_time}')
+                training_time.reset()
+                logging_time.reset()
+
+        steps += 1

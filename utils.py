@@ -1,6 +1,7 @@
 import pickle
 from pathlib import Path
 import torch
+from time import time
 
 
 class Run:
@@ -63,6 +64,28 @@ def bin_labels(min, max, num_bins):
     for i in range(1, num_bins+1):
         labels += [f'{bins[i-1]:.2f}-{bins[i]:.2f}']
     return labels
+
+
+class StopWatch:
+    def __init__(self):
+        self.start_time = 0
+        self.stop_time = 0
+        self.total_time = 0
+        self.running = False
+
+    def reset(self):
+        self.total_time = 0
+        self.running = False
+
+    def go(self):
+        self.start_time = time()
+        self.running = True
+
+    def pause(self):
+        if not self.running:
+            raise Exception('Call go() before calling pause()')
+        self.total_time += time() - self.start_time
+        self.running = False
 
 
 if __name__ == '__main__':
