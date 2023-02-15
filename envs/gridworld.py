@@ -1,5 +1,4 @@
 from PIL import Image
-import numpy as np
 from matplotlib import pyplot as plt
 from collections import namedtuple
 
@@ -38,7 +37,7 @@ class Vector2:
 
 State = namedtuple("State", ["pos", "direction", "grid"])
 
-start_location = {'u': 0, 'r': 1, 'd': 2, 'l': 4}
+start_location = {'U': 0, 'R': 1, 'D': 2, 'L': 4}
 empty_tile = {'e'}.union(start_location)
 goal_tile = {'g'}
 lava_tile = {'l'}
@@ -53,17 +52,24 @@ class Renderer:
         self.env = env
         self.empty_tile = Image.open('empty_tile.png')
         self.goal_tile = Image.open('goal_tile.png')
+        self.lava_tile = Image.open('lava_tile.png')
+        self.wall_tile = Image.open('wall_tile.png')
         self.arrow = [Image.open(f'arrow_{direction}.png') for direction in range(0, 4)]
 
     def _background(self, grid):
         tiles = []
-        for x in range(self.env.min.x, self.env.max.x + 1):
+        for x in range(len(grid[0])):
             tiles += [[]]
-            for y in range(self.env.min.y, self.env.max.y + 1):
+            for y in range(len(grid)):
                 if grid[y][x] in goal_tile:
                     tiles[x] += [self.goal_tile]
                 if grid[y][x] in empty_tile:
                     tiles[x] += [self.empty_tile]
+                if grid[y][x] in wall_tile:
+                    tiles[x] += [self.wall_tile]
+                if grid[y][x] in lava_tile:
+                    tiles[x] += [self.lava_tile]
+
         return tiles
 
     def draw(self, pos, direction, grid):
@@ -90,17 +96,45 @@ class RGBImageWrapper:
         return self.renderer.draw(obs.pos, obs.direction, obs.grid), reward, terminated, truncated, info
 
 
+class MaxStepsWrapper:
+    def __init__(self, env, max_steps):
+        self.env = env
+        self.steps = 0
+        self.max_steps = max_steps
+
+    def reset(self):
+        self.steps = 0
+        return self.env.reset()
+
+    def step(self, action):
+        self.steps += 1
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        if self.steps == self.max_steps:
+            truncated = True
+        return obs, reward, terminated, truncated, info
+
+
 class SimpleGridWorld:
     DIRECTION = [Vector2(0, -1), Vector2(1, 0), Vector2(0, 1), Vector2(-1, 0)]
 
     def __init__(self, grid, render_mode=None):
         """
-        creates a simple grid
-        :param start_pos: Vector2(x, y) starting position
-        :param start_direction: 0 -> up, 1 -> right, 2 -> down, 3 -> left
-        :param width: width of grid
-        :param height: height of grid
-        :param goal_pos: goal_pos in grid
+        creates a simple gridworld
+
+        param: grid:
+
+            to create a 3x3 gridworld provide a list of strings
+            grid = [
+              'Uee',
+              'eee',
+              'eeg'
+            ]
+
+            U, D, L, R -> starting position
+            e -> empty tile
+            g -> goal tile
+            l -> lava tile
+            w -> wall tile
         """
 
         self.grid = grid
@@ -114,7 +148,7 @@ class SimpleGridWorld:
                     self.pos = Vector2(x, y)
                     self.direction = start_location[tile]
 
-        self.max = Vector2(len(self.grid[0])-1, len(self.grid)-1)
+        self.max = Vector2(len(self.grid[0]) - 1, len(self.grid) - 1)
         self.min = Vector2(0, 0)
         self.render_mode = render_mode
         self.render = Renderer(self)
@@ -122,7 +156,7 @@ class SimpleGridWorld:
             plt.ion()
             self.fig = plt.figure()
             self.ax = self.fig.add_subplot(111)
-            self.ax_image = self.ax.imshow(self.render.draw(self.pos, self.direction,  self.grid))
+            self.ax_image = self.ax.imshow(self.render.draw(self.pos, self.direction, self.grid))
             self.fig.canvas.draw()
             self.fig.canvas.flush_events()
 
@@ -165,11 +199,24 @@ class SimpleGridWorld:
 
 
 env_configs = {
-    '9x9': [
-            'uee',
-            'eee',
-            'eeg'
-        ],
+    '3x3': [
+        'Uee',
+        'eee',
+        'eeg'
+    ],
+    'bandit': [
+        'Rg'
+    ],
+    'corridor': [
+        'Reeeg'
+    ],
+    'the_choice': [
+        'lUg'
+    ],
+    'go_around': [
+        'eee',
+        'Rwg'
+    ]
 }
 
 
@@ -179,7 +226,8 @@ def make(env_name, render_mode=None):
 
 if __name__ == '__main__':
 
-    env = make('9x9', render_mode='human')
+    env = make('go_around', render_mode='human')
+    env = MaxStepsWrapper(env, 100)
     env = RGBImageWrapper(env)
     obs = env.reset()
     terminated, truncated = False, False
@@ -192,5 +240,6 @@ if __name__ == '__main__':
             action = int(action)
             if 0 <= action <= 2:
                 obs, reward, terminated, truncated, info = env.step(action)
+                print(reward, terminated)
         except ValueError:
             continue
