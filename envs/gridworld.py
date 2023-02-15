@@ -1,6 +1,7 @@
 from PIL import Image
 from matplotlib import pyplot as plt
 from collections import namedtuple
+import importlib.resources
 
 
 class Vector2:
@@ -50,11 +51,19 @@ blocking_tile = wall_tile
 class Renderer:
     def __init__(self, env):
         self.env = env
-        self.empty_tile = Image.open('empty_tile.png')
-        self.goal_tile = Image.open('goal_tile.png')
-        self.lava_tile = Image.open('lava_tile.png')
-        self.wall_tile = Image.open('wall_tile.png')
-        self.arrow = [Image.open(f'arrow_{direction}.png') for direction in range(0, 4)]
+
+        with importlib.resources.path("envs", "empty_tile.png") as empty_tile:
+            self.empty_tile = Image.open(empty_tile)
+        with importlib.resources.path("envs", "goal_tile.png") as goal_tile:
+            self.goal_tile = Image.open(goal_tile)
+        with importlib.resources.path("envs", "lava_tile.png") as lava_tile:
+            self.lava_tile = Image.open(lava_tile)
+        with importlib.resources.path("envs", "wall_tile.png") as wall_tile:
+            self.wall_tile = Image.open(wall_tile)
+        self.arrow = []
+        for direction in range(0, 4):
+            with importlib.resources.path("envs", f'arrow_{direction}.png') as arrow:
+                self.arrow += [Image.open(arrow)]
 
     def _background(self, grid):
         tiles = []
