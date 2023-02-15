@@ -36,36 +36,44 @@ class Vector2:
         return f'{(self.x, self.y)}'
 
 
-State = namedtuple("State", ["pos", "direction", "goal"])
+State = namedtuple("State", ["pos", "direction", "grid"])
+
+start_location = {'u': 0, 'r': 1, 'd': 2, 'l': 4}
+empty_tile = {'e'}.union(start_location)
+goal_tile = {'g'}
+lava_tile = {'l'}
+wall_tile = {'w'}
+terminal_tile = goal_tile.union(lava_tile)
+reward_tile = {'g': 1.0, 'l': -1.0}
+blocking_tile = wall_tile
 
 
 class Renderer:
     def __init__(self, env):
         self.env = env
-        self.empty_tile = Image.open('empty_tile.bmp')
-        self.goal_tile = Image.open('goal_tile.bmp')
-        self.arrow = [Image.open(f'arrow_{direction}.bmp') for direction in range(0, 4)]
+        self.empty_tile = Image.open('empty_tile.png')
+        self.goal_tile = Image.open('goal_tile.png')
+        self.arrow = [Image.open(f'arrow_{direction}.png') for direction in range(0, 4)]
 
-    def _background(self):
-        self.grid = []
+    def _background(self, grid):
+        tiles = []
         for x in range(self.env.min.x, self.env.max.x + 1):
-            self.grid += [[]]
+            tiles += [[]]
             for y in range(self.env.min.y, self.env.max.y + 1):
-                if x == self.env.goal.x and y == self.env.goal.y:
-                    self.grid[x] += [self.goal_tile]
-                else:
-                    self.grid[x] += [self.empty_tile]
+                if grid[y][x] in goal_tile:
+                    tiles[x] += [self.goal_tile]
+                if grid[y][x] in empty_tile:
+                    tiles[x] += [self.empty_tile]
+        return tiles
 
-    def _concatentate_tiles(self):
-        rows = []
-        for row in self.grid:
-            rows += [np.concatenate(row, axis=0)]
-        return np.concatenate(rows, axis=1)
-
-    def draw(self, pos, direction):
-        self._background()
-        self.grid[pos.x][pos.y] = np.add(self.arrow[direction], self.grid[pos.x][pos.y])
-        return self._concatentate_tiles()
+    def draw(self, pos, direction, grid):
+        tiles = self._background(grid)
+        tiles[pos.x][pos.y] = Image.alpha_composite(tiles[pos.x][pos.y], self.arrow[direction])
+        image = Image.new('RGB', (len(grid[0]) * 21, len(grid) * 21))
+        for x, row in enumerate(tiles):
+            for y, tile in enumerate(row):
+                image.paste(tile, (x * 21, y * 21))
+        return image
 
 
 class RGBImageWrapper:
@@ -75,17 +83,17 @@ class RGBImageWrapper:
 
     def reset(self):
         obs = self.env.reset()
-        return self.renderer.draw(obs.pos, obs.direction)
+        return self.renderer.draw(obs.pos, obs.direction, obs.grid)
 
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
-        return self.renderer.draw(obs.pos, obs.direction), reward, terminated, truncated, info
+        return self.renderer.draw(obs.pos, obs.direction, obs.grid), reward, terminated, truncated, info
 
 
 class SimpleGridWorld:
     DIRECTION = [Vector2(0, -1), Vector2(1, 0), Vector2(0, 1), Vector2(-1, 0)]
 
-    def __init__(self, start_pos, start_direction, width, height, goal_pos, render_mode=None):
+    def __init__(self, grid, render_mode=None):
         """
         creates a simple grid
         :param start_pos: Vector2(x, y) starting position
@@ -94,36 +102,50 @@ class SimpleGridWorld:
         :param height: height of grid
         :param goal_pos: goal_pos in grid
         """
-        self.pos = start_pos
-        self.direction = start_direction
-        self.max = Vector2(width-1, height-1)
+
+        self.grid = grid
+
+        self.pos = None
+        self.direction = None
+
+        for y, row in enumerate(grid):
+            for x, tile in enumerate(row):
+                if tile in start_location:
+                    self.pos = Vector2(x, y)
+                    self.direction = start_location[tile]
+
+        self.max = Vector2(len(self.grid[0])-1, len(self.grid)-1)
         self.min = Vector2(0, 0)
-        self.goal = goal_pos
         self.render_mode = render_mode
         self.render = Renderer(self)
         if render_mode == 'human':
             plt.ion()
             self.fig = plt.figure()
             self.ax = self.fig.add_subplot(111)
-            self.ax_image = self.ax.imshow(self.render.draw(self.pos, self.direction))
+            self.ax_image = self.ax.imshow(self.render.draw(self.pos, self.direction,  self.grid))
             self.fig.canvas.draw()
             self.fig.canvas.flush_events()
 
     def draw(self):
         if self.render_mode == 'human':
-            self.ax_image.set_data(self.render.draw(self.pos, self.direction))
+            self.ax_image.set_data(self.render.draw(self.pos, self.direction, self.grid))
             self.fig.canvas.draw()
             self.fig.canvas.flush_events()
 
     def reset(self):
         self.draw()
-        return State(self.pos, self.direction, self.goal)
+        return State(self.pos, self.direction, self.grid)
 
     def step(self, action):
         """
         steps the environment
         :param action: 0 -> Turn left, 1 -> turn right, 2 -> forward
         """
+
+        reward = 0.
+        terminated = False
+        truncated = False
+
         if action == 0:  # left
             self.direction = (self.direction - 1) % 4
         if action == 1:  # right
@@ -131,27 +153,28 @@ class SimpleGridWorld:
         if action == 2:  # forward
             lookahead = self.pos + self.DIRECTION[self.direction]
             if self.max >= lookahead >= self.min:
-                self.pos += self.DIRECTION[self.direction]
-        reward = 1.0 if self.pos == self.goal else 0.0
-        terminated = True if self.pos == self.goal else False
-        truncated = False
+                tile = self.grid[lookahead.y][lookahead.x]
+                if tile not in blocking_tile:
+                    self.pos += self.DIRECTION[self.direction]
+                reward = reward_tile[tile] if tile in reward_tile else 0.
+                terminated = tile in terminal_tile
 
         self.draw()
 
-        return State(self.pos, self.direction, self.goal), reward, terminated, truncated, {}
+        return State(self.pos, self.direction, self.grid), reward, terminated, truncated, {}
 
-
-GridConf = namedtuple('env_config', ['start_pos', 'start_direction', 'width', 'height', 'goal'])
 
 env_configs = {
-    '9x9': GridConf(start_pos=Vector2(0, 0), start_direction=0, width=3, height=3, goal=Vector2(2, 2)),
-    'bandit': GridConf(start_pos=Vector2(0, 0), start_direction=1, width=2, height=1, goal=Vector2(1, 0)),
-    'corridor': GridConf(start_pos=Vector2(0, 0), start_direction=1, width=5, height=1, goal=Vector2(4, 0)),
+    '9x9': [
+            'uee',
+            'eee',
+            'eeg'
+        ],
 }
 
 
 def make(env_name, render_mode=None):
-    return SimpleGridWorld(*env_configs[env_name], render_mode=render_mode)
+    return SimpleGridWorld(env_configs[env_name], render_mode=render_mode)
 
 
 if __name__ == '__main__':
