@@ -1,12 +1,9 @@
 import torch
-import torch.nn as nn
-from torch.nn.functional import one_hot, mse_loss
-from torch.optim import Adam
+from torch import nn as nn
+from torch.nn.functional import one_hot
 from copy import deepcopy
 from blocks import MLPBlock, Embedder
-from torchvision.transforms.functional import resize
-from viz import make_panel
-from matplotlib import pyplot as plt
+from torch.distributions import OneHotCategorical
 
 
 class Critic(nn.Module):
@@ -50,7 +47,7 @@ def td_lambda(rewards, cont, values, discount=0.997, lam=0.95):
     :param cont: [..., 1]
     :param values: [..., 1]
     :param discount: discount factor default 0.997
-    :param lam: lamda factor as in td lambda algorithm, default 0.95
+    :param lam: lambda factor as in td lambda algorithm, default 0.95
     :return: target values for value function
     """
     target_values = torch.zeros_like(values)
@@ -74,99 +71,196 @@ def polyak_update(critic, ema_critic, critic_ema_decay=0.98):
             ema_critic_params.data = ema_critic_params * critic_ema_decay + (1 - critic_ema_decay) * critic_params
 
 
+class Actor(nn.Module):
+    def __init__(self, action_size, action_classes, h_size=512, z_size=32, z_classes=32, mlp_size=512, mlp_layers=2):
+        super().__init__()
+        self.action_size = action_size
+        self.action_classes = action_classes
+        self.output = nn.Linear(mlp_size, action_size * action_classes, bias=False)
+        self.critic = torch.nn.Sequential(
+            nn.Linear(h_size + z_size * z_classes, mlp_size, bias=False),
+            *[MLPBlock(mlp_size, mlp_size) for _ in range(mlp_layers)],
+            self.output
+        )
+
+    def forward(self, h, z):
+        h_z_flat = torch.cat((h, z.flatten(-2)), dim=-1)
+        action_flat = self.critic(h_z_flat)
+        return action_flat.unflatten(-1, (self.action_size, self.action_classes))
+
+    def sample_action(self, h, z):
+        action_logits = self.forward(h, z)
+        return OneHotCategorical(logits=action_logits).sample()
+
+
+class ActorLoss:
+    def __init__(self):
+        self.reinforce_loss = None
+        self.entropy_loss = None
+        self.actor_loss = None
+
+    def __call__(self, actor_logits, actions, critic_values, mask=None):
+        """
+        Policy gradient loss for actor, value based Reinforce + a fixed entropy bonus
+        :param actor_logits: (L, N, action_size, action_classes) - raw scores from the policy drawn from
+        states
+        :param actions: (L, N, action_size, action_classes) - actions taken by the policy during the trajectory
+        :param : (L, N, 1) values of states in the trajectory from the critic
+        :param mask: optional (L, N, 1) -  Boolean Tensor indicating values to not be included in the loss
+
+        to use:
+
+        actor_logits = actor(obs)
+        actor_loss = actor_criterion(actor_logits, act, critic_values, mask)
+        opt_actor.zero_grad()
+        actor_loss.backward()
+        opt_actor.step()
+
+
+        """
+
+        # critic values are shifted right, last action in trajectory is discarded
+        # if the last action is the terminal, its going to be tha pad action anyway
+
+        actor_dist = OneHotCategorical(logits=actor_logits[:-1])
+        self.actor_reinforce_loss = - critic_values[1:].detach() * actor_dist.log_prob(actions[:-1])
+        self.actor_entropy_loss = - 3e-4 * actor_dist.entropy()
+        if mask is not None:
+            self.actor_reinforce_loss = self.actor_reinforce_loss * mask[:-1]
+            self.actor_entropy_loss = self.actor_entropy_loss * mask[:-1]
+        self.actor_reinforce_loss = self.actor_reinforce_loss.mean()
+        self.actor_entropy_loss = self.actor_entropy_loss.mean()
+        self.actor_loss = self.actor_reinforce_loss + self.actor_entropy_loss
+        return self.actor_loss
+
+    def loss_dict(self):
+        return {
+            'actor_reinforce_loss': self.reinforce_loss.item(),
+            'actor_entropy_loss': self.actor_entropy_loss.item(),
+            'actor_loss': self.actor_loss.item()
+        }
+
+
 if __name__ == '__main__':
 
     from replay import sample_batch, Step
-    from env import Env
-    import gymnasium as gym
-    from gymnasium import RewardWrapper
-    import random
-    from minigrid.wrappers import FlatObsWrapper, RGBImgObsWrapper
-    # env = Env()
-    buff = []
+    import replay
+    from torch.optim import Adam
+    from envs import gridworld
 
-    env = gym.make("MiniGrid-Empty-5x5-v0")
-    env = RGBImgObsWrapper(env)
+    env = gridworld.make("3x3", render_mode='human')
 
-    class RewardOneOrZeroOnlyWrapper(RewardWrapper):
-        def __init__(self, env):
-            super().__init__(env)
+    class CriticTable(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.table = nn.Parameter(torch.zeros(3, 3, 4))
 
-        def reward(self, reward):
-            return 0. if reward == 0. else 1.
+        def forward(self, observation):
+            L, N, _ = observation.shape
+            observation = observation.flatten(0, 1)
+            x, y, d = observation[:, 0], observation[:, 1], observation[:, 2]
+            return self.table[x, y, d].unflatten(0, (L, N, 1))
 
-    env = RewardOneOrZeroOnlyWrapper(env)
 
-    def rollout_open_loop_policy(env, actions):
-        x, r, c = env.reset(), 0, 1.0
-        for a in actions:
-            yield Step(x, a, r, c)
-            x, r, done, _ = env.step(a)
-            c = 0.0 if done else 1.0
-        yield Step(x, None, r, c)
+    class ActorTable(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.table = nn.Parameter(torch.zeros(3, 3, 4, 4))
 
-    def prepro(x):
-        x = torch.from_numpy(x['image']).permute(2, 0, 1).float() / 255.0
-        return resize(x, [64, 64])
+        def forward(self, observation):
+            L, N, _ = observation.shape
+            observation = observation.flatten(0, 1)
+            x, y, d = observation[:, 0], observation[:, 1], observation[:, 2]
+            return self.table[x, y, d].unflatten(0, (L, N)).unsqueeze(-2)
+
+        def sample_action(self, observation):
+            logits = self.forward(observation)
+            return OneHotCategorical(logits=logits).sample()
+
+    def prepro(obs):
+        return torch.tensor([obs.pos.x, obs.pos.y, obs.direction], dtype=torch.long)
 
     def prepro_action(a):
         return one_hot(torch.tensor([a]), 4)
 
-    def rollout_random_policy(env):
-        (x, _), r, c = env.reset(), 0, 1.0
-        truncated = False
-        while c == 1.0 and not truncated:
-            a = random.randint(0, 3)
-            yield Step(prepro(x), prepro_action(a), r, c)
-            x, r, done, truncated, _ = env.step(a)
-            c = 0.0 if done else 1.0
-        yield Step(prepro(x), None, r, c)
+
+    def rollout(env, actor):
+
+        obs = env.reset()
+        obs_prepro = prepro(obs)
+        reward, terminated, truncated, cont = 0.0, False, False, 1.
+
+        while True:
+            action = actor.sample_action(obs_prepro.unsqueeze(0).unsqueeze(0))
+            action_env = action.argmax(-1).item()
+
+            yield Step(obs_prepro, action[0, 0], reward, cont)
+
+            obs, reward, terminated, truncated, info = env.step(action_env)
+            obs_prepro = prepro(obs)
+            cont = 0. if terminated or truncated else 1.
+
+            if terminated or truncated:
+
+                yield Step(obs_prepro, None, reward, cont)
+
+                obs = env.reset()
+                obs_prepro = prepro(obs)
+                reward, terminated, truncated, cont = 0.0, False, False, 1.
 
 
-    for _ in range(500):
-        for step in rollout_random_policy(env):
-            buff.append(step)
-
-    pad_state = torch.zeros(3, 64, 64, dtype=torch.uint8)
     pad_action = one_hot(torch.tensor([0]), 4)
+    pad_state = torch.tensor([0, 0, 0], dtype=torch.long)
 
-    embedder = Embedder()
-    critic = Critic(h_size=4096, z_size=1, z_classes=1)
+    critic = CriticTable()
     ema_critic = deepcopy(critic)
-
-    # random_noise = torch.randn(1, 10)
-    # assert torch.allclose(critic(random_noise), ema_critic(random_noise))
-
     opt = Adam(critic.parameters(), lr=1e-2)
+
+    actor = ActorTable()
+    opt_actor = Adam(actor.parameters(), lr=1e-2)
+    actor_criterion = ActorLoss()
+
+    batch_size = 8
+
+    def on_policy(rollout):
+        buff = []
+
+        for _ in range(10 * batch_size):
+            buff += [next(rollout)]
+            if replay.is_trajectory_end(buff[-1]):
+                trajectory = replay.get_tail_trajectory(buff)
+                print(f'traj end reward: {replay.total_reward(trajectory)} len {len(trajectory)}')
+        return buff
+
 
     drawn = None
     for step in range(20000):
-        obs, act, reward, cont, mask = sample_batch(buff, 10, 4, pad_state, pad_action)
-        z = torch.zeros(obs.shape[0], obs.shape[1], 1, 1)
 
-        embed = embedder(obs)
-        ema_values = ema_critic(embed, z)
+        buff = on_policy(rollout(env, actor))
+
+        obs, act, reward, cont, mask = sample_batch(buff, 10, batch_size, pad_state, pad_action)
+
+        ema_values = ema_critic(obs)
         value_targets = td_lambda(reward, cont, ema_values)
-        critic_values = critic(embed, z)
-        loss = 0.5 * ( critic_values - value_targets) ** 2
+        critic_values = critic(obs)
+        loss = 0.5 * (critic_values - value_targets) ** 2
         loss = loss * mask
         loss = loss.mean()
         opt.zero_grad()
         loss.backward()
         opt.step()
-
         polyak_update(critic, ema_critic)
 
+        actor_logits = actor(obs)
+        actor_loss = actor_criterion(actor_logits, act, critic_values, mask)
+        opt_actor.zero_grad()
+        actor_loss.backward()
+        opt_actor.step()
+
         if step % 10 == 0:
-            panel = make_panel(obs, act, reward, cont, mask, critic_values, symexp_on=False)
-            if drawn:
-                drawn.set_data(panel.permute(1, 2, 0))
-            else:
-                drawn = plt.imshow(panel.permute(1, 2, 0))
-            plt.pause(0.01)
+            for i in range(critic.table.shape[2]):
+                print(critic.table[:, :, i])
 
+            for i in range(actor.table.shape[2]):
+                print(actor.table[:, :, i].argmax(-1))
 
-        # if step % 10 == 0:
-        #     value = monte_carlo(reward)
-        #     print(value.T)
-        #     print(critic(obs, z).T)
