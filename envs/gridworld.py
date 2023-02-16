@@ -2,6 +2,7 @@ from PIL import Image
 from matplotlib import pyplot as plt
 from collections import namedtuple
 import importlib.resources
+from copy import copy
 
 
 class Vector2:
@@ -148,14 +149,14 @@ class SimpleGridWorld:
 
         self.grid = grid
 
-        self.pos = None
-        self.direction = None
-
         for y, row in enumerate(grid):
             for x, tile in enumerate(row):
                 if tile in start_location:
-                    self.pos = Vector2(x, y)
-                    self.direction = start_location[tile]
+                    self.start_pos = Vector2(x, y)
+                    self.start_direction = start_location[tile]
+
+        self.pos = copy(self.start_pos)
+        self.direction = self.start_direction
 
         self.max = Vector2(len(self.grid[0]) - 1, len(self.grid) - 1)
         self.min = Vector2(0, 0)
@@ -176,6 +177,8 @@ class SimpleGridWorld:
             self.fig.canvas.flush_events()
 
     def reset(self):
+        self.pos = copy(self.start_pos)
+        self.direction = self.start_direction
         self.draw()
         return State(self.pos, self.direction, self.grid)
 
