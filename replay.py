@@ -1,4 +1,4 @@
-from env import Env
+from envs.env import Env
 import torch
 from collections import deque, namedtuple
 
@@ -146,7 +146,7 @@ def sample_batch(buffer, length, batch_size, pad_state, pad_action):
     :param batch_size: batch size N
     :return: x -> [T, N, ... ], a -> [T, N, ...], r -> [T, N, 1], c -> [T, N, 1], m -> [T, N, 1]
     """
-    offsets = torch.randint(0, len(buffer), (batch_size,)).tolist()
+    offsets = torch.randint(0, len(buffer)-1, (batch_size,)).tolist()
     return make_batch_elegant(buffer, offsets, length, pad_state, pad_action)
 
 
@@ -160,6 +160,26 @@ def get_trajectories(buff, max_trajectories=None):
         trajectories += [get_trajectory(buff, offset)]
         offset += len(trajectories[-1])
     return trajectories
+
+
+def get_tail_trajectory(buff):
+    """
+    returns the most recent trajectory in the buffer
+    """
+    trajectory = deque()
+    for i in reversed(range(0, len(buff))):
+        trajectory.appendleft(buff[i])
+        if i == 0:
+            return trajectory
+        if is_trajectory_end(buff[i-1]):
+            return trajectory
+
+
+def total_reward(trajectory):
+    t_reward = 0
+    for step in trajectory:
+        t_reward += step.reward
+    return t_reward
 
 
 if __name__ == '__main__':

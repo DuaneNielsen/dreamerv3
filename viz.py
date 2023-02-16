@@ -6,7 +6,6 @@ from PIL import Image, ImageDraw
 from torch.nn.functional import conv1d
 from torchvision.transforms.functional import to_tensor
 from torchvision.utils import make_grid
-
 from replay import stack_trajectory
 from symlog import symexp
 
@@ -144,6 +143,7 @@ class CaptionedObsFactory:
             action_caption = f'action: {action.argmax().item()}'
 
         if self.symexp_on:
+            obs = symexp(obs)
             reward = symexp(reward)
         reward_caption = f'rew: {reward.item():.2f}'
         cont_caption = f'con: {cont.item():.2f}'
@@ -163,15 +163,15 @@ class CaptionedObsFactory:
         )
 
 
-def make_trajectory_panel(trajectory, pad_action, symexp_on=True, action_table=None):
+def visualize_trajectory(trajectory, pad_action, symexp_on=True, action_table=None):
     obs, action, reward, cont = stack_trajectory(trajectory, pad_action=pad_action)
-    if symexp_on:
-        obs = symexp(obs)
-        reward = symexp(reward)
-
     vizualize_step = CaptionedObsFactory(action_table=action_table, symexp_on=symexp_on)
     panel = [vizualize_step(*step) for step in zip(obs, action, reward, cont)]
-    panel = torch.stack(panel)
+    return torch.stack(panel)
+
+
+def make_trajectory_panel(trajectory, pad_action, symexp_on=True, action_table=None):
+    panel = visualize_trajectory(trajectory, pad_action, symexp_on, action_table)
     return make_grid(panel)
 
 
@@ -201,6 +201,10 @@ def make_panel(obs, action, reward, cont, mask, value=None, filter_mask=None, sy
     visualize_step = CaptionedObsFactory(action_table=action_table, symexp_on=symexp_on)
 
     panel = [visualize_step(*step) for step in zip(obs_sample, action_sample, reward_sample, cont_sample, value_sample)]
+
+    if len(panel) == 0:
+        return make_grid(torch.zeros(1, 3, 64, 64))
+
     return make_grid(torch.stack(panel), nrow)
 
 
@@ -223,6 +227,8 @@ def make_batch_panels(obs, action, reward, cont, obs_pred, reward_pred, cont_pre
     terminal_panel = make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask, terminal_filter, symexp_on, action_table=action_table)
 
     return batch_panel, rewards_panel, terminal_panel
+
+
 
 
 if __name__ == '__main__':

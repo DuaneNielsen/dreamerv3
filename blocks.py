@@ -63,7 +63,8 @@ class Embedder(nn.Module):
         )
 
     def forward(self, x):
-        if len(x.shape) == 4:
-            x = x.unsqueeze(0)
+        """
+        param: x: [T, N, C, H, W] observation in standard form
+        """
         T, N, C, H, W = x.shape
         return self.embedder(x.flatten(start_dim=0, end_dim=1)).unflatten(0, (T, N))

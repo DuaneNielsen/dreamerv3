@@ -42,6 +42,14 @@ class Encoder(nn.Module):
         )
 
     def forward(self, h, e):
+        """
+        Encodes a single timestep.
+
+        Note that since we require h to encode, we cannot encode more than 1 step at a time,
+        so the input does not take a T dimension
+        param: h : [N, h_size]
+        param: e :  [N, embed_size]
+        """
         return self.encoder(torch.cat([h, e], dim=-1))
 
 
@@ -134,7 +142,7 @@ class RSSM(nn.Module):
          Dynamics predictor    zpost ~ p ( zpost | h )
          Reward predictor:     r ~ p( z | h )
          Continue predictor:   c ~ p( z | h )
-         Decoder:              x ~ p( x | h, z )
+         Decoder:              x ~ p( x | h, z )\ 
         """
 
         self.h_size = h_size
@@ -148,8 +156,8 @@ class RSSM(nn.Module):
         self.dummy = nn.Parameter(torch.empty(0))
 
         # prediction state
-        self.h = None
-        self.z = None
+        # self.h = None
+        # self.z = None
 
     @property
     def device(self):
@@ -211,60 +219,57 @@ class RSSM(nn.Module):
 
         return x_dist, reward_symlog_dist, continue_dist, z_prior_logits, z_post_logits
 
-    def reset(self, N=1, h0=None, x=None):
+    def new_hidden0(self, batch_size):
         """
-        Reset the environment to start state
-        :param N : batch size for simulation, default 1, ignored if h0 is used
-        :param h0: [N, h_size ] : hidden variable to initialize environment, zero if None
+        :param batch_size: batch size
+        return: a tensor with the correct humber of hidden dims for the rssm
         """
-        self.h = h0 if h0 is not None else torch.zeros(N, self.h_size, device=self.device)
-        if x is not None:
-            embed = self.embedder(x)
-            self.z = self.encoder(h0, embed[0])
-        else:
-            self.z = OneHotCategorical(logits=self.dynamics_pred(self.h)).sample()
-        return self.h, self.z
+        return torch.zeros(batch_size, self.h_size, device=self.device)
 
-    def step(self, a):
+    def encode_observation(self, h, obs):
         """
-        Runs a batched step on the environment
+        :param h : [N, h_size ]
+        :param obs : [N, C, H, W]
+        :return z_dist : [N, 32, 32] OneHotCategoricalStraightThru
+        """
+        embed = self.embedder(obs.unsqueeze(0)).squeeze(0)
+        return OneHotCategoricalStraightThru(logits=self.encoder(h, embed))
+
+    def step_reality(self, h, obs, a):
+        """
+        Runs a batched step on the environment,
+        using either an observation or an imagined latent
+        :param h: [N, h_size]
         :param a: [N, a_size, a_cls ]
+        :param z: [N, z_size, z_classes]
         :return: x, r, c : observation, reward, continue
 
 
-        ^                          ┌────┐
-        x0 ◄───────────────────────┤dec │
-                                   └────┘
-                                    ▲  ▲
-                                    │  │   ┌─────────┐
-                                    │  │   │Sequence │    
-                                    │  │   │Model    │
-                                    │  │   │         │
-        h0──┬───────────────────────┼──┴──►│         ├───►h1─►
-            │                       │      │         │
-            │  ┌───┐                │      │         │
-            ├─►│dyn├─►zpost ────────┴────► │         │
-            │  └───┘                       │         │
-            │                              │         │
-            │  ┌───┐                       │         │
-            ├─►│rew├─►reward0              │         │
-            │  └───┘                       │         │
-            │                              │         │
-            │  ┌───┐                       │         │
-            └─►│con├─►cont0                │         │
-               └───┘                       │         │
-                                           │         │
-        a0────────────────────────────────►│         │    a1─►
-                                           └─────────┘
         """
 
-        self.h = self.seq_model(self.z, a, self.h)
-        self.z = OneHotCategorical(logits=self.dynamics_pred(self.h)).sample()
-        reward = self.reward_pred(self.h).mean
-        cont = self.continue_pred(self.h).probs
-        return self.h, self.z, reward, cont
+        z = self.encode_observation(h, obs).mode
+        h = self.seq_model(z, a, h)
+        return h, z
 
-    def imagine(self, h0, obs, reward, cont, policy, imagination_horizon=15):
+    def step_imagine(self, h, z, a):
+        """
+        Runs a batched step on the environment,
+        using either an observation or an imagined latent
+        :param h: [N, h_size]
+        :param a: [N, a_size, a_cls ]
+        :param z: [N, z_size, z_classes]
+        :return: x, r, c : observation, reward, continue
+
+
+        """
+
+        h = self.seq_model(z, a, h)
+        z_imagine = OneHotCategorical(logits=self.dynamics_pred(h)).sample()
+        reward = self.reward_pred(h).mean
+        cont = self.continue_pred(h).probs
+        return h, z_imagine, reward, cont
+
+    def imagine(self, h0, obs, reward, cont, policy, imagination_horizon=15, epsilon=0.01):
         """
         runs a policy on the model from the provided start states
         :param h0: [N, hdim]
@@ -278,14 +283,14 @@ class RSSM(nn.Module):
         where H = imagination_horizon + 1
         """
 
-        (h, z), r, c = self.reset(h0=h0, x=obs[0]), reward[0], cont[0]
-        a = policy(h, z)
+        z = self.encode_observation(h0, obs).sample()
+        a = policy.sample_action(h0, z)
 
-        h_list, z_list, a_list, reward_list, cont_list = [h], [z], [a], [r], [c]
+        h_list, z_list, a_list, reward_list, cont_list = [h0], [z], [a], [reward], [cont]
 
         for t in range(imagination_horizon):
-            h, z, reward, cont = self.step(a)
-            a = policy(h, z)
+            h, z, reward, cont = self.step_imagine(h_list[-1], z_list[-1], a_list[-1])
+            a = policy.sample_action(h, z)
 
             h_list += [h]
             z_list += [z]

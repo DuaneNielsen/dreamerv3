@@ -1,21 +1,24 @@
 import gymnasium as gym
 from gymnasium import RewardWrapper
 from minigrid.wrappers import RGBImgObsWrapper
-from replay import sample_batch, Step, get_trajectories
+
+import replay
+import viz
+from replay import sample_batch, Step
 from collections import deque
 from torch.nn.functional import one_hot, mse_loss
 from torchvision.transforms.functional import resize
 from rssm import make_small, RSSMLoss
-from critic import Critic, td_lambda, polyak_update
+from critic import Critic, td_lambda, polyak_update, Actor, ActorLoss
 import torch
 from torch.optim import Adam
 from argparse import ArgumentParser
 from symlog import symlog, symexp
-from time import time
 import copy
 import utils
 import wandb
-from viz import make_trajectory_panel, make_batch_panels, make_panel
+from viz import make_batch_panels, make_panel
+from wandb.data_types import Video
 
 
 def log(obs, action, r, c, mask, obs_dist, r_dist, c_dist, z_prior, z_post, step):
@@ -61,16 +64,6 @@ def log(obs, action, r, c, mask, obs_dist, r_dist, c_dist, z_prior, z_post, step
         }, step=step)
 
 
-def generate_and_log_trajectory_on_world_model(rssm, policy, step):
-    imagination_gen = rollout_on_world_model(rssm, policy)
-    imagine_buffer = [next(imagination_gen) for step in range(16)]
-    trajectories = get_trajectories(imagine_buffer)
-    panel = make_trajectory_panel(trajectories[0], pad_action.to(rssm.device), action_table=action_table)
-    wandb.log({
-        'imagined_obs': wandb.Image(panel)
-    }, step=step)
-
-
 def prepro(x):
     x = torch.from_numpy(x['image']).permute(2, 0, 1).float() / 255.0
     return resize(x, [64, 64])
@@ -95,29 +88,23 @@ def random_policy_for_world_model(h, z):
     return one_hot(torch.randint(0, 4, [z.shape[0]]), 4).to(z.device).unsqueeze(1)
 
 
-def rollout(env, policy, seed=42):
-    (x, _), r, c = env.reset(seed=seed), 0, 1.0
+def rollout(env, policy, rssm, seed=42):
+    terminated, truncated = True, True
     while True:
-        a = policy(None, None)
-        yield Step(prepro(x), a, r, c)
-        x, r, terminated, truncated, _ = env.step(a.argmax().item())
+        if terminated or truncated:
+            (obs, _), r, c = env.reset(seed=seed), 0, 1.0
+            obs_pre = prepro(obs).to(args.device).unsqueeze(0)
+            h = rssm.new_hidden0(batch_size=1)
+            z = rssm.encode_observation(h, obs_pre).mode
+
+        a = policy.sample_action(h, z)
+        yield Step(obs_pre[0].detach().cpu(), a[0].detach().cpu(), r, c)
+        obs, r, terminated, truncated, _ = env.step(a[0].argmax().item())
+        obs_pre = prepro(obs).to(args.device).unsqueeze(0)
+        h, z = rssm.step_reality(h, obs_pre, a)
         c = 0.0 if terminated else 1.0
         if terminated or truncated:
-            yield Step(prepro(x), None, r, c)
-            (x, _), r, c = env.reset(seed=seed), 0, 1.0
-
-
-def rollout_on_world_model(env, policy):
-    (h, z), r, c = env.reset(), [0], [1.0]
-    x = env.decoder(h, z).mean
-    while True:
-        a = policy(None, None).unsqueeze(0).to(env.device)
-        yield Step(x[0], a[0], r[0], c[0])
-        h, z, r, c = env.step(a)
-        x = env.decoder(h, z).mean
-        if c[0] < 0.5:
-            yield Step(x[0], None, r[0], c[0])
-            x, r, c = env.reset(), [0], [1.0]
+            yield Step(obs_pre[0].detach().cpu(), None, r, c)
 
 
 if __name__ == '__main__':
@@ -157,6 +144,7 @@ if __name__ == '__main__':
     env = gym.make("MiniGrid-Empty-5x5-v0")
     env = RGBImgObsWrapper(env, tile_size=13)
 
+
     class RewardOneOrZeroOnlyWrapper(RewardWrapper):
         def __init__(self, env):
             super().__init__(env)
@@ -164,29 +152,37 @@ if __name__ == '__main__':
         def reward(self, reward):
             return 0. if reward == 0. else 1.
 
+
     env = RewardOneOrZeroOnlyWrapper(env)
 
     pad_state = torch.zeros(3, 64, 64, dtype=torch.uint8)
     pad_action = one_hot(torch.tensor([0]), 4)
 
-    policy = random_policy
-    buff = deque(maxlen=args.replay_capacity)
-    gen = rollout(env, policy)
-    for i in range(500):
-        buff += [next(gen)]
-
     rssm = make_small(action_classes=4).to(args.device)
     rssm_opt = Adam(rssm.parameters(), lr=args.world_model_learning_rate, eps=args.world_model_adam_epsilon)
     for p in rssm.parameters():
-        p.register_hook(lambda grad: torch.clamp(grad, -args.world_model_gradient_clipping, args.world_model_gradient_clipping))
+        p.register_hook(
+            lambda grad: torch.clamp(grad, -args.world_model_gradient_clipping, args.world_model_gradient_clipping))
     criterion = RSSMLoss()
 
     critic = Critic()
     ema_critic = copy.deepcopy(critic)
-    critic, ema_critic = critic.to(args.device), ema_critic.to(args.device)
-    ac_opt = Adam(critic.parameters(), lr=args.actor_critic_learning_rate, eps=args.actor_critic_adam_epsilon)
+    actor = Actor(action_size=1, action_classes=4)
+    critic, ema_critic, actor = critic.to(args.device), ema_critic.to(args.device), actor.to(args.device)
+    critic_opt = Adam(critic.parameters(), lr=args.actor_critic_learning_rate, eps=args.actor_critic_adam_epsilon)
+    actor_opt = Adam(actor.parameters(), lr=args.actor_critic_learning_rate, eps=args.actor_critic_adam_epsilon)
     for p in critic.parameters():
-        p.register_hook(lambda grad: torch.clamp(grad, -args.actor_critic_gradient_clipping, args.actor_critic_gradient_clipping))
+        p.register_hook(
+            lambda grad: torch.clamp(grad, -args.actor_critic_gradient_clipping, args.actor_critic_gradient_clipping))
+    for p in actor.parameters():
+        p.register_hook(
+            lambda grad: torch.clamp(grad, -args.actor_critic_gradient_clipping, args.actor_critic_gradient_clipping))
+    actor_criterion = ActorLoss()
+
+    buff = deque(maxlen=args.replay_capacity)
+    gen = rollout(env, actor, rssm)
+    for i in range(20):
+        buff += [next(gen)]
 
     steps = 0
     training_time = utils.StopWatch()
@@ -223,7 +219,6 @@ if __name__ == '__main__':
             wandb.log(criterion.loss_dict(), step=steps)
 
             if steps % args.log_every_n_steps == 0:
-
                 logging_time.go()
                 log(obs, act, reward, cont, mask, obs_dist, rew_dist, cont_dist, z_prior, z_post, steps)
                 utils.save(utils.run.rundir, rssm, rssm_opt, args, steps, loss.item())
@@ -233,37 +228,62 @@ if __name__ == '__main__':
 
         # sample 1 step from replay buffer and imagine trajectory under policy
         obs, act, reward, cont, mask = sample_batch(buff, 1, args.batch_size, pad_state, pad_action)
-        obs, reward, cont, mask = obs.to(args.device), reward.to(args.device), cont.to(args.device), mask.to(args.device)
-        h0 = torch.zeros(args.batch_size, rssm.h_size, device=args.device)
+        obs, reward, cont, mask = obs.to(args.device), reward.to(args.device), cont.to(args.device), mask.to(
+            args.device)
+        h0 = rssm.new_hidden0(args.batch_size)
+        h, z, a, reward_symlog, cont = rssm.imagine(h0, obs[0], reward[0], cont[0], actor,
+                                                    imagination_horizon=args.imagination_horizon, epsilon=0.01)
 
-        h, z, a, reward_symlog, cont = rssm.imagine(h0, obs, reward, cont, random_policy_for_world_model,
-                                                    imagination_horizon=args.imagination_horizon)
+        h, z = h.detach(), z.detach()
 
         # compute values based on imagined trajectory and update critic
         values = ema_critic(h, z)
         value_targets = td_lambda(reward_symlog, cont, values)
-        values_pred = critic(h, z)
-        critic_loss = mse_loss(values_pred, value_targets)
-        ac_opt.zero_grad()
+        value_preds = critic(h, z)
+        critic_loss = mse_loss(value_preds, value_targets)
+
+        critic_opt.zero_grad()
         critic_loss.backward()
-        ac_opt.step()
+        critic_opt.step()
         polyak_update(critic, ema_critic)
+
+        actor_logits = actor(h, z)
+        actor_loss = actor_criterion(actor_logits, a, value_preds)
+
+        actor_opt.zero_grad()
+        actor_loss.backward()
+        actor_opt.step()
 
         training_time.pause()
 
         with torch.no_grad():
+            wandb.log(actor_criterion.loss_dict(), step=steps)
             wandb.log({'critic_loss': critic_loss.item()}, step=steps)
+
+            if replay.is_trajectory_end(buff[-1]):
+                latest_trajectory = replay.get_tail_trajectory(buff)
+                trajectory_reward = replay.total_reward(latest_trajectory)
+                trajectory_viz = viz.visualize_trajectory(latest_trajectory, pad_action, symexp_on=False, action_table=action_table)
+                trajectory_viz = (trajectory_viz * 255).to(dtype=torch.uint8).numpy()
+                wandb.log({
+                    'trajectory_reward': trajectory_reward,
+                    'trajectory_length': len(latest_trajectory),
+                    'trajectory_viz': Video(trajectory_viz)
+                }, step=steps)
+                print(f'trajectory end: reward {trajectory_reward} len: {len(latest_trajectory)}')
+
             if steps % args.log_every_n_steps == 0:
                 logging_time.go()
 
                 decoded_obs = rssm.decoder(h, z).mean
                 mask = mask.repeat(1 + args.imagination_horizon, 1, 1)
                 imagination_panel = make_panel(decoded_obs[:, 0:2], a[:, 0:2], reward_symlog[:, 0:2], cont[:, 0:2],
-                                               mask[:, 0:2], values_pred[:, 0:2], action_table=action_table, nrow=16)
+                                               mask[:, 0:2], value_preds[:, 0:2], action_table=action_table, nrow=16)
                 wandb.log({'imagination_panel': wandb.Image(imagination_panel)}, step=steps)
 
                 logging_time.pause()
-                print(f'logged step {steps} training_time {training_time.total_time} logging_time {logging_time.total_time}')
+                print(
+                    f'logged step {steps} training_time {training_time.total_time} logging_time {logging_time.total_time}')
                 training_time.reset()
                 logging_time.reset()
 

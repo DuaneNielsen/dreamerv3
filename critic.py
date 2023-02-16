@@ -123,20 +123,20 @@ class ActorLoss:
         # if the last action is the terminal, its going to be tha pad action anyway
 
         actor_dist = OneHotCategorical(logits=actor_logits[:-1])
-        self.actor_reinforce_loss = - critic_values[1:].detach() * actor_dist.log_prob(actions[:-1])
-        self.actor_entropy_loss = - 3e-4 * actor_dist.entropy()
+        self.reinforce_loss = - critic_values[1:].detach() * actor_dist.log_prob(actions[:-1])
+        self.entropy_loss = - 3e-4 * actor_dist.entropy()
         if mask is not None:
-            self.actor_reinforce_loss = self.actor_reinforce_loss * mask[:-1]
-            self.actor_entropy_loss = self.actor_entropy_loss * mask[:-1]
-        self.actor_reinforce_loss = self.actor_reinforce_loss.mean()
-        self.actor_entropy_loss = self.actor_entropy_loss.mean()
-        self.actor_loss = self.actor_reinforce_loss + self.actor_entropy_loss
+            self.reinforce_loss = self.reinforce_loss * mask[:-1]
+            self.entropy_loss = self.entropy_loss * mask[:-1]
+        self.reinforce_loss = self.reinforce_loss.mean()
+        self.entropy_loss = self.entropy_loss.mean()
+        self.actor_loss = self.reinforce_loss + self.entropy_loss
         return self.actor_loss
 
     def loss_dict(self):
         return {
             'actor_reinforce_loss': self.reinforce_loss.item(),
-            'actor_entropy_loss': self.actor_entropy_loss.item(),
+            'actor_entropy_loss': self.entropy_loss.item(),
             'actor_loss': self.actor_loss.item()
         }
 

@@ -17,9 +17,11 @@ class OneHotCategoricalStraightThru(OneHotCategorical):
         probs = probs if probs is not None else softmax(logits, -1)
         uniform = torch.ones_like(probs)
         probs = (1 - epsilon) * probs + epsilon * uniform
-        super().__init__(probs=probs)
+        super().__init__(probs=probs, validate_args=False)
 
-    def sample(self, epsilon=0.01):
+    def sample(self, sample_shape=None):
+        if sample_shape:
+            raise NotImplementedError('sample_shape is not implemented')
         return super().sample() + self.probs - self.probs.detach()
 
 
@@ -27,4 +29,11 @@ def categorical_kl_divergence_clamped(logits_left, logits_right, clamp=1.):
     return kl_divergence(
         OneHotCategorical(logits=logits_left),
         OneHotCategorical(logits=logits_right)
-    ).clamp(max=1.)
+    ).clamp(max=clamp)
+
+
+if __name__ == '__main__':
+
+    for i in range(10):
+        OneHotCategoricalStraightThru(logits=torch.randn(10, 1, 4)).log_prob(
+            OneHotCategoricalStraightThru(logits=torch.randn(10, 1, 4)).sample())

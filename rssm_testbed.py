@@ -2,10 +2,10 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 from torch.distributions import OneHotCategorical, Bernoulli, Normal
-from symlog import symlog, symexp
+from symlog import symexp
 from argparse import ArgumentParser
 from matplotlib import pyplot as plt
-from env import Env
+from envs.env import Env
 from replay import Step, sample_batch
 from collections import deque
 from rssm import RSSM, RSSMLoss
