@@ -258,7 +258,7 @@ class RSSM(nn.Module):
         :param h: [N, h_size]
         :param a: [N, a_size, a_cls ]
         :param z: [N, z_size, z_classes]
-        :return: x, r, c : observation, reward, continue
+        :return: h, z, r, c : hidden, z, reward, continue
 
 
         """
@@ -354,3 +354,93 @@ def make_small(action_classes, in_channels=3):
         continue_pred=ContinuePredictor(),
         h_size=512
     )
+
+
+if __name__ == '__main__':
+
+    """
+    Load a saved RSSM and manually inspect the model quality
+    """
+
+    import utils
+    from torch.optim import Adam
+    from argparse import ArgumentParser
+    from matplotlib import pyplot as plt
+    from torch.distributions import OneHotCategorical
+    from matplotlib.widgets import Button
+    from torch.nn.functional import one_hot
+
+    with torch.no_grad():
+        parser = ArgumentParser()
+        parser.add_argument('--resume', type=str, required=True)
+        args = parser.parse_args()
+
+        rssm = make_small(action_classes=4, in_channels=3)
+        rssm_opt = Adam(params=rssm.parameters())
+        rssm, rssm_opt, steps, resume_args, loss = utils.load(args.resume, rssm, rssm_opt)
+
+        class ImaginedEnv:
+            def __init__(self):
+
+                self.h = None
+                self.z = None
+
+            def reset(self):
+                self.h = rssm.new_hidden0(batch_size=1)
+                z_logits = rssm.dynamics_pred(self.h)
+                self.z = OneHotCategorical(logits=z_logits).mode
+                return rssm.decoder(self.h, self.z).mean
+
+            def step(self, action):
+                if self.h is None:
+                    raise Exception('call env.reset() before step')
+                self.h, self.z, r, c = rssm.step_imagine(self.h, self.z, action)
+                obs = rssm.decoder(self.h, self.z).mean
+                return obs, r, c
+
+        def press_button(action):
+            action = one_hot(torch.tensor([[action]]), 4)
+            obs, r, c = env.step(action)
+            obs_plt.set_data(obs[0].permute(1, 2, 0).clamp(0, 1))
+            fig.canvas.draw()
+            fig.canvas.flush_events()
+
+        def press_zero(event):
+            press_button(0)
+
+        def press_one(event):
+            press_button(1)
+
+        def press_two(event):
+            press_button(2)
+
+        def press_three(event):
+            press_button(3)
+
+
+        env = ImaginedEnv()
+        obs = env.reset()
+
+        fig, ax = plt.subplots()
+        obs_plt = ax.imshow(obs[0].permute(1, 2, 0).detach().clamp(0, 1))
+        fig.canvas.draw()
+        fig.canvas.flush_events()
+
+        axzero = fig.add_axes([0.2, 0.05, 0.1, 0.075])
+        bzero = Button(axzero, '0')
+        bzero.on_clicked(press_zero)
+
+        axone = fig.add_axes([0.3, 0.05, 0.1, 0.075])
+        bone = Button(axone, '1')
+        bone.on_clicked(press_one)
+
+        axone = fig.add_axes([0.4, 0.05, 0.1, 0.075])
+        btwo = Button(axone, '2')
+        btwo.on_clicked(press_two)
+
+        axthree = fig.add_axes([0.5, 0.05, 0.1, 0.075])
+        bthree = Button(axthree, '3')
+        bthree.on_clicked(press_three)
+
+
+        plt.show()
