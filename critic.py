@@ -232,11 +232,12 @@ if __name__ == '__main__':
                 print(f'traj end reward: {replay.total_reward(trajectory)} len {len(trajectory)}')
         return buff
 
+    total_steps = 0
 
-    drawn = None
     for step in range(20000):
 
         buff = on_policy(rollout(env, actor))
+        total_steps += len(buff)
 
         obs, act, reward, cont, mask = sample_batch(buff, 10, batch_size, pad_state, pad_action)
 
@@ -264,3 +265,4 @@ if __name__ == '__main__':
             for i in range(actor.table.shape[2]):
                 print(actor.table[:, :, i].argmax(-1))
 
+            print(total_steps)
