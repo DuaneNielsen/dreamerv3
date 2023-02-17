@@ -28,7 +28,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import OneHotCategorical, Normal, Bernoulli
 from dists import OneHotCategoricalStraightThru, categorical_kl_divergence_clamped
-from blocks import MLPBlock, ModernDecoderConvBlock, Embedder
+from blocks import MLPBlock, ModernDecoderConvBlock, Embedder, DecoderConvBlock
 
 
 class Encoder(nn.Module):
@@ -61,10 +61,10 @@ class Decoder(nn.Module):
             *[MLPBlock(mlp_hidden, mlp_hidden) for _ in range(mlp_layers - 1)],
             MLPBlock(mlp_hidden, 4 * 4 * cnn_multi * 2 ** 3),
             nn.Unflatten(-1, (cnn_multi * 2 ** 3, 4, 4)),
-            ModernDecoderConvBlock(cnn_multi * 2 ** 2, 8, 8, cnn_multi * 2 ** 3),
-            ModernDecoderConvBlock(cnn_multi * 2 ** 1, 16, 16, cnn_multi * 2 ** 2),
-            ModernDecoderConvBlock(cnn_multi * 2 ** 0, 32, 32, cnn_multi * 2 ** 1),
-            ModernDecoderConvBlock(out_channels, 64, 64, cnn_multi),
+            DecoderConvBlock(cnn_multi * 2 ** 2, 8, 8, cnn_multi * 2 ** 3),
+            DecoderConvBlock(cnn_multi * 2 ** 1, 16, 16, cnn_multi * 2 ** 2),
+            DecoderConvBlock(cnn_multi * 2 ** 0, 32, 32, cnn_multi * 2 ** 1),
+            DecoderConvBlock(out_channels, 64, 64, cnn_multi),
         )
 
     def forward(self, h, z):

@@ -198,6 +198,7 @@ if __name__ == '__main__':
 
         # sample batch from replay buffer
         buff += [next(gen)]
+
         obs, act, reward, cont, mask = sample_batch(buff, args.batch_length, args.batch_size, pad_state, pad_action)
         obs, act, reward, cont, mask = obs.to(args.device), act.to(args.device), reward.to(args.device), cont.to(
             args.device), mask.to(args.device)
