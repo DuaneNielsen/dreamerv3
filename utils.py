@@ -31,24 +31,30 @@ with Path('runs/.runs').open('wb') as f:
 print(f"starting run {run.run_id}")
 
 
-def save(rundir, rssm, optimizer, args, steps, loss):
+def save(rundir, rssm, rssm_optim, critic, critic_optim, actor, actor_optim, args, steps):
     torch.save({
         'rssm_state_dict': rssm.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
+        'rssm_optim_state_dict': rssm_optim.state_dict(),
+        'critic_state_dict': critic.state_dict(),
+        'critic_optim_state_dict': critic_optim.state_dict(),
+        'actor_state_dict': actor.state_dict(),
+        'actor_optim_state_dict': actor_optim.state_dict(),
         'args': args,
-        'steps': steps,
-        'loss': loss
+        'steps': steps
     }, rundir + '/model_opt.pt')
 
 
-def load(rundir, rssm, optimizer):
+def load(rundir, rssm, rssm_optim, critic, critic_optim, actor, actor_optim):
     checkpoint = torch.load(rundir + '/model_opt.pt')
     rssm.load_state_dict(checkpoint['rssm_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    rssm_optim.load_state_dict(checkpoint['rssm_optim_state_dict'])
+    critic.load_state_dict(checkpoint['critic_state_dict'])
+    critic_optim.load_state_dict(checkpoint['critic_optim_state_dict'])
+    actor.load_state_dict(checkpoint['actor_state_dict'])
+    actor_optim.load_state_dict(checkpoint['actor_optim_state_dict'])
     args = checkpoint['args']
     steps = checkpoint['steps']
-    loss = checkpoint['loss']
-    return rssm, optimizer, steps, args, loss
+    return rssm, rssm_optim, critic, critic_optim, actor, actor_optim, steps, args
 
 
 def bin_values(values, min, max, num_bins):

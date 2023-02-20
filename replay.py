@@ -1,6 +1,9 @@
+import encoding
 from envs.env import Env
 import torch
 from collections import deque, namedtuple
+from symlog import symlog
+from encoding import encode_onehot, decode_onehot
 
 """
 x -> state or observation
@@ -148,6 +151,34 @@ def sample_batch(buffer, length, batch_size, pad_state, pad_action):
     """
     offsets = torch.randint(0, len(buffer)-1, (batch_size,)).tolist()
     return make_batch_elegant(buffer, offsets, length, pad_state, pad_action)
+
+
+class BatchLoader:
+    def __init__(self, pad_observation, pad_action, obs_codec=None, reward_codec=None, device='cpu'):
+        self.pad_observation = pad_observation
+        self.pad_action = pad_action
+        self.obs_codec = obs_codec
+        self.codec = reward_codec
+        self.device = device
+
+    def sample(self, replay_buffer, batch_length, batch_size):
+
+        observation, action, reward, cont, mask = \
+            sample_batch(replay_buffer, batch_length, batch_size, self.pad_observation, self.pad_action)
+
+        if self.obs_codec:
+            observation = self.obs_codec.encode(observation)
+
+        if self.codec:
+            reward = self.codec.encode(reward)
+
+        observation = observation.to(self.device).detach()
+        action = action.to(self.device).detach()
+        reward = reward.to(self.device).detach()
+        cont = cont.to(self.device).detach()
+        mask = mask.to(self.device).detach()
+
+        return observation, action, reward, cont, mask
 
 
 def get_trajectories(buff, max_trajectories=None):

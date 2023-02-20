@@ -248,7 +248,7 @@ env_configs = {
         'lReeeg'
     ],
     'turn_around': [
-        'lLeeeg'
+        'lLeeg'
     ],
     'the_choice': [
         'lUg'

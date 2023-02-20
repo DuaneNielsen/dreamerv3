@@ -4,18 +4,21 @@ from torch.nn.functional import one_hot
 from copy import deepcopy
 from blocks import MLPBlock, Embedder
 from torch.distributions import OneHotCategorical
+from dists import OneHotCategoricalStraightThru
 
 
 class Critic(nn.Module):
     def __init__(self,  h_size=512, z_size=32, z_classes=32, mlp_size=512, mlp_layers=2):
         super().__init__()
-        self.output = nn.Linear(mlp_size, 1, bias=False)
+
         self.critic = torch.nn.Sequential(
             nn.Linear(h_size + z_size * z_classes, mlp_size, bias=False),
             *[MLPBlock(mlp_size, mlp_size) for _ in range(mlp_layers)],
-            self.output
+            nn.Linear(mlp_size, 256, bias=False)
         )
-        self.output.weight.data.zero_()
+        # self.output.weight.data.zero_()
+        # self.output.bias.data.zero_()
+        # self.output.bias.data[127] = 4e-8
 
     def forward(self, h, z):
         h_z_flat = torch.cat((h, z.flatten(-2)), dim=-1)
@@ -90,7 +93,11 @@ class Actor(nn.Module):
 
     def sample_action(self, h, z):
         action_logits = self.forward(h, z)
-        return OneHotCategorical(logits=action_logits).sample()
+        return OneHotCategoricalStraightThru(logits=action_logits).sample()
+
+    def exploit_action(self, h, z):
+        action_logits = self.forward(h, z)
+        return OneHotCategorical(logits=action_logits).mode
 
 
 class ActorLoss:
@@ -122,7 +129,7 @@ class ActorLoss:
         # critic values are shifted right, last action in trajectory is discarded
         # if the last action is the terminal, its going to be tha pad action anyway
 
-        actor_dist = OneHotCategorical(logits=actor_logits[:-1])
+        actor_dist = OneHotCategoricalStraightThru(logits=actor_logits[:-1])
         self.reinforce_loss = - critic_values[1:].detach() * actor_dist.log_prob(actions[:-1])
         self.entropy_loss = - 3e-4 * actor_dist.entropy()
         if mask is not None:

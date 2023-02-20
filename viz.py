@@ -54,11 +54,12 @@ class PlotJointAndMarginals:
 
         # this could be faster if vectorized
         for x, y in zip(cells_x, cells_y):
-            assert y-1 < cells_joint.shape[1], f'{x} {y} {cells_joint.shape}'
-            cells_joint[y-1, x-1] += 1
+            assert y - 1 < cells_joint.shape[1], f'{x} {y} {cells_joint.shape}'
+            cells_joint[y - 1, x - 1] += 1
 
         # the scatter plot:
-        self.ax.imshow(cells_joint, origin='lower', interpolation='none', extent=[xymin, xymax+binwidth, xymin, xymax + binwidth])
+        self.ax.imshow(cells_joint, origin='lower', interpolation='none',
+                       extent=[xymin, xymax + binwidth, xymin, xymax + binwidth])
 
 
 class PlotLosses:
@@ -104,19 +105,6 @@ def make_caption(caption, width, height):
     return to_tensor(img)
 
 
-# def add_caption_to_observation(obs, action, reward, cont, value=None, action_table=None):
-#     if action_table:
-#         top_caption = make_caption(f'{action_table[action.argmax().item()]}', 64, 16).to(obs.device)
-#     else:
-#         top_caption = make_caption(f'{action.argmax().item()}', 64, 16).to(obs.device)
-#     reward_continue_caption = make_caption(f'{reward.item():.2f} {cont.item():.2f}', 64, 16).to(obs.device)
-#
-#     if value:
-#         value_caption = make_caption(f'value: {value.item():.2f}', 64, 16).to(obs.device)
-#         return torch.cat([top_caption, obs, reward_continue_caption, value_caption], dim=1)
-#     return torch.cat([top_caption, obs, reward_continue_caption], dim=1)
-
-
 def add_caption_to_observation(caption_above_list, obs, caption_below_list, width=64, height=16):
     top_captions = [make_caption(caption, width, height) for caption in caption_above_list]
     bottom_captions = [make_caption(caption, width, height) for caption in caption_below_list]
@@ -126,15 +114,13 @@ def add_caption_to_observation(caption_above_list, obs, caption_below_list, widt
 
 
 class CaptionedObsFactory:
-    def __init__(self, symexp_on, action_table=None):
+    def __init__(self, action_table=None):
         """
         An object that takes care of converting all the information in a
         Step to an captioned image
-        :param symexp_on:
         :param action_table:
         """
         self.action_table = action_table
-        self.symexp_on = symexp_on
 
     def __call__(self, obs, action, reward, cont, value=None):
         if self.action_table is not None:
@@ -142,17 +128,12 @@ class CaptionedObsFactory:
         else:
             action_caption = f'action: {action.argmax().item()}'
 
-        if self.symexp_on:
-            obs = symexp(obs)
-            reward = symexp(reward)
         reward_caption = f'rew: {reward.item():.2f}'
         cont_caption = f'con: {cont.item():.2f}'
 
         caption_below_list = [reward_caption, cont_caption]
 
         if value is not None:
-            if self.symexp_on:
-                value = symexp(value)
             value_caption = f'val: {value.item():.2f}'
             caption_below_list += [value_caption]
 
@@ -163,26 +144,32 @@ class CaptionedObsFactory:
         )
 
 
-def visualize_trajectory(trajectory, pad_action, symexp_on=True, action_table=None):
+def visualize_trajectory(trajectory, pad_action, action_table=None):
     obs, action, reward, cont = stack_trajectory(trajectory, pad_action=pad_action)
-    vizualize_step = CaptionedObsFactory(action_table=action_table, symexp_on=symexp_on)
+    vizualize_step = CaptionedObsFactory(action_table=action_table)
     panel = [vizualize_step(*step) for step in zip(obs, action, reward, cont)]
     return torch.stack(panel)
 
 
-def make_trajectory_panel(trajectory, pad_action, symexp_on=True, action_table=None):
-    panel = visualize_trajectory(trajectory, pad_action, symexp_on, action_table)
+def visualize_imagined_trajectory(obs_dec, action, rewards_dec, cont, mask, value_preds, action_table):
+    frames = []
+    for t in range(obs_dec.size(0)):
+        frames += [make_panel(obs_dec[t], action[t], rewards_dec[t], cont[t], mask[t], value=value_preds[t], action_table=action_table)]
+    return torch.stack(frames)
+
+
+def make_trajectory_panel(trajectory, pad_action, action_table=None):
+    panel = visualize_trajectory(trajectory, pad_action, action_table)
     return make_grid(panel)
 
 
-def make_panel(obs, action, reward, cont, mask, value=None, filter_mask=None, symexp_on=True, action_table=None, nrow=8):
+def make_panel(obs, action, reward, cont, mask, value=None, filter_mask=None, action_table=None, nrow=8):
     """
     obs: observations [..., C, H, W]
     action: discrete action [..., AD, AC]
     reward: rewards [..., 1]
     cont: continue [..., 1]
     filter_mask: booleans, filter results in panel [...]
-    symexp_on: obs and rewards are read out in sym_exp
     action_table: {0: "action1", 1:{action2}... etc}
     """
 
@@ -198,7 +185,7 @@ def make_panel(obs, action, reward, cont, mask, value=None, filter_mask=None, sy
     else:
         value_sample = [None] * cont_sample.shape[0]
 
-    visualize_step = CaptionedObsFactory(action_table=action_table, symexp_on=symexp_on)
+    visualize_step = CaptionedObsFactory(action_table=action_table)
 
     panel = [visualize_step(*step) for step in zip(obs_sample, action_sample, reward_sample, cont_sample, value_sample)]
 
@@ -208,27 +195,29 @@ def make_panel(obs, action, reward, cont, mask, value=None, filter_mask=None, sy
     return make_grid(torch.stack(panel), nrow)
 
 
-def make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask, filter_mask=None, symexp_on=True, action_table=None):
-    gt_panel = make_panel(obs, action, reward, cont, mask, filter_mask=filter_mask, symexp_on=symexp_on, action_table=action_table)
-    pred_panel = make_panel(obs_pred, action, reward_pred, cont_pred, mask, filter_mask=filter_mask, symexp_on=symexp_on, action_table=action_table)
+def make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask, filter_mask=None,
+                       action_table=None):
+    gt_panel = make_panel(obs, action, reward, cont, mask, filter_mask=filter_mask, action_table=action_table)
+    pred_panel = make_panel(obs_pred, action, reward_pred, cont_pred, mask, filter_mask=filter_mask,
+                            action_table=action_table)
     return torch.cat((gt_panel, pred_panel), dim=-1)
 
 
-def make_batch_panels(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask, symexp_on=True, action_table=None):
-
+def make_batch_panels(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask, action_table=None):
     batch_filter_mask = torch.full_like(mask[:, :, 0], False, dtype=torch.bool)
     batch_filter_mask[0:8, 0:8] = True
-    batch_panel = make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask, batch_filter_mask, symexp_on, action_table=action_table)
+    batch_panel = make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask,
+                                     batch_filter_mask, action_table=action_table)
 
     rewards_filter = reward.squeeze() != 0.0
-    rewards_panel = make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask, rewards_filter, symexp_on, action_table=action_table)
+    rewards_panel = make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask,
+                                       rewards_filter, action_table=action_table)
 
     terminal_filter = (cont.squeeze() == 0.0) & mask.squeeze()
-    terminal_panel = make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask, terminal_filter, symexp_on, action_table=action_table)
+    terminal_panel = make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask,
+                                        terminal_filter, action_table=action_table)
 
     return batch_panel, rewards_panel, terminal_panel
-
-
 
 
 if __name__ == '__main__':
