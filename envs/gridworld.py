@@ -1,8 +1,11 @@
 from PIL import Image
+from gymnasium.core import ObsType, WrapperObsType, ActType, WrapperActType
 from matplotlib import pyplot as plt
 from collections import namedtuple
 import importlib.resources
 from copy import copy
+from gymnasium import ObservationWrapper, ActionWrapper
+from torchvision.transforms.functional import to_tensor, resize
 
 
 class Vector2:
@@ -39,7 +42,7 @@ class Vector2:
 
 State = namedtuple("State", ["pos", "direction", "grid"])
 
-start_location = {'U': 0, 'R': 1, 'D': 2, 'L': 4}
+start_location = {'U': 0, 'R': 1, 'D': 2, 'L': 3}
 empty_tile = {'e'}.union(start_location)
 goal_tile = {'g'}
 lava_tile = {'l'}
@@ -97,13 +100,15 @@ class RGBImageWrapper:
         self.env = env
         self.renderer = Renderer(env)
 
-    def reset(self):
-        obs = self.env.reset()
-        return self.renderer.draw(obs.pos, obs.direction, obs.grid)
+    def reset(self, **kwargs):
+        obs = self.env.reset(**kwargs)
+        image = self.renderer.draw(obs.pos, obs.direction, obs.grid)
+        return image, {}
 
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(action)
-        return self.renderer.draw(obs.pos, obs.direction, obs.grid), reward, terminated, truncated, info
+        image = self.renderer.draw(obs.pos, obs.direction, obs.grid)
+        return image, reward, terminated, truncated, info
 
 
 class MaxStepsWrapper:
@@ -112,9 +117,9 @@ class MaxStepsWrapper:
         self.steps = 0
         self.max_steps = max_steps
 
-    def reset(self):
+    def reset(self, **kwargs):
         self.steps = 0
-        return self.env.reset()
+        return self.env.reset(**kwargs)
 
     def step(self, action):
         self.steps += 1
@@ -122,6 +127,26 @@ class MaxStepsWrapper:
         if self.steps == self.max_steps:
             truncated = True
         return obs, reward, terminated, truncated, info
+
+
+class TensorObsWrapper(ObservationWrapper):
+
+    def __init__(self, env, width=64, height=64):
+        super().__init__(env)
+        self.width = width
+        self.height = height
+
+    def observation(self, observation: ObsType) -> WrapperObsType:
+        observation = resize(observation, [self.height, self.width])
+        return to_tensor(observation)
+
+
+class OneHotTensorActionWrapper(ActionWrapper):
+    def __init__(self, env):
+        super().__init__(env)
+
+    def action(self, action: WrapperActType) -> ActType:
+        return action.argmax(-1)
 
 
 class SimpleGridWorld:
@@ -176,7 +201,7 @@ class SimpleGridWorld:
             self.fig.canvas.draw()
             self.fig.canvas.flush_events()
 
-    def reset(self):
+    def reset(self, seed=None, **kwargs):
         self.pos = copy(self.start_pos)
         self.direction = self.start_direction
         self.draw()
@@ -220,7 +245,10 @@ env_configs = {
         'Rg'
     ],
     'corridor': [
-        'Reeeg'
+        'lReeeg'
+    ],
+    'turn_around': [
+        'lLeeeg'
     ],
     'the_choice': [
         'lUg'
@@ -228,7 +256,13 @@ env_configs = {
     'go_around': [
         'eee',
         'Rwg'
+    ],
+    'dont_fall': [
+        'lll',
+        'Reg',
+        'lll'
     ]
+
 }
 
 
@@ -238,10 +272,18 @@ def make(env_name, render_mode=None):
 
 if __name__ == '__main__':
 
-    env = make('go_around', render_mode='human')
+    from torch.nn.functional import one_hot
+    import torch
+
+    plt.ion()
+    fig, ax = plt.subplots()
+
+    env = make('corridor', render_mode='human')
     env = MaxStepsWrapper(env, 100)
     env = RGBImageWrapper(env)
-    obs = env.reset()
+    env = TensorObsWrapper(env)
+    env = OneHotTensorActionWrapper(env)
+    obs, info = env.reset()
     terminated, truncated = False, False
 
     while not (terminated or truncated):
@@ -251,7 +293,11 @@ if __name__ == '__main__':
                 break
             action = int(action)
             if 0 <= action <= 2:
+                action = one_hot(torch.tensor([action]), 3)
                 obs, reward, terminated, truncated, info = env.step(action)
                 print(reward, terminated)
+                ax.imshow(obs.permute(1, 2, 0))
+                fig.canvas.draw()
+                fig.canvas.flush_events()
         except ValueError:
             continue
