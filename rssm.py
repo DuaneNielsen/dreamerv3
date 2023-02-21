@@ -382,11 +382,12 @@ if __name__ == '__main__':
     with torch.no_grad():
         parser = ArgumentParser()
         parser.add_argument('--resume', type=str, required=True)
+        parser.add_argument('--action_classes', type=int, required=True)
         args = parser.parse_args()
 
-        rssm = make_small(action_classes=4, in_channels=3)
-        rssm_opt = Adam(params=rssm.parameters())
-        rssm, rssm_opt, steps, resume_args, loss = utils.load(args.resume, rssm, rssm_opt)
+        rssm = make_small(action_classes=args.action_classes, in_channels=3)
+        steps, _ = utils.load(args.resume, rssm)
+
 
         class ImaginedEnv:
             def __init__(self):
@@ -408,7 +409,7 @@ if __name__ == '__main__':
                 return obs, r, c
 
         def press_button(action):
-            action = one_hot(torch.tensor([[action]]), 4)
+            action = one_hot(torch.tensor([[action]]), args.action_classes)
             obs, r, c = env.step(action)
             obs_plt.set_data(obs[0].permute(1, 2, 0).clamp(0, 1))
             fig.canvas.draw()
