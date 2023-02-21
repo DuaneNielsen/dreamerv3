@@ -3,7 +3,6 @@ from pathlib import Path
 import torch
 from time import time
 
-
 class Run:
     def __init__(self):
         self.run_id = -1
@@ -44,17 +43,23 @@ def save(rundir, rssm, rssm_optim, critic, critic_optim, actor, actor_optim, arg
     }, rundir + '/model_opt.pt')
 
 
-def load(rundir, rssm, rssm_optim, critic, critic_optim, actor, actor_optim):
+def load(rundir, rssm=None, rssm_optim=None, critic=None, critic_optim=None, actor=None, actor_optim=None):
     checkpoint = torch.load(rundir + '/model_opt.pt')
-    rssm.load_state_dict(checkpoint['rssm_state_dict'])
-    rssm_optim.load_state_dict(checkpoint['rssm_optim_state_dict'])
-    critic.load_state_dict(checkpoint['critic_state_dict'])
-    critic_optim.load_state_dict(checkpoint['critic_optim_state_dict'])
-    actor.load_state_dict(checkpoint['actor_state_dict'])
-    actor_optim.load_state_dict(checkpoint['actor_optim_state_dict'])
+    if rssm is not None:
+        rssm.load_state_dict(checkpoint['rssm_state_dict'])
+    if rssm_optim is not None:
+        rssm_optim.load_state_dict(checkpoint['rssm_optim_state_dict'])
+    if critic is not None:
+        critic.load_state_dict(checkpoint['critic_state_dict'])
+    if critic_optim is not None:
+        critic_optim.load_state_dict(checkpoint['critic_optim_state_dict'])
+    if actor is not None:
+        actor.load_state_dict(checkpoint['actor_state_dict'])
+    if actor_optim is not None:
+        actor_optim.load_state_dict(checkpoint['actor_optim_state_dict'])
     args = checkpoint['args']
     steps = checkpoint['steps']
-    return rssm, rssm_optim, critic, critic_optim, actor, actor_optim, steps, args
+    return steps, args
 
 
 def bin_values(values, min, max, num_bins):
