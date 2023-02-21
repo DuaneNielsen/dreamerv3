@@ -170,8 +170,11 @@ if __name__ == '__main__':
     parser.add_argument('--max_steps', type=int, default=8 * 10 ** 4)
     parser.add_argument('--env_action_classes', type=int, default=3)
     parser.add_argument('--env_action_size', type=int, default=1)
+    parser.add_argument('--seed', type=int, default=0)
     args = parser.parse_args()
 
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
     wandb.init(project="dreamerv3-minigrid-demo")
     wandb.config.update(args)
 
@@ -334,6 +337,7 @@ if __name__ == '__main__':
             value_preds_for_actor_enc = critic(h, z)
             value_preds_for_actor_dec = reward_codec.decode(value_preds_for_actor_enc)
 
+
         actor_logits = actor(h, z)
         actor_loss = actor_criterion(actor_logits, a, value_preds_for_actor_dec)
 
@@ -367,8 +371,7 @@ if __name__ == '__main__':
                 decoded_obs = obs_codec.decode(rssm.decoder(h, z).mean)
                 mask = mask.repeat(1 + args.imagination_horizon, 1, 1)
                 value_preds_dec = reward_codec.decode(value_preds_enc)
-                value_preds_95th_percentile = torch.quantile(value_preds_for_actor_dec[1:], 0.95, interpolation='lower')
-                value_preds_5th_percentile = torch.quantile(value_preds_for_actor_dec[1:], 0.05, interpolation='higher')
+
 
                 wandb.log({
                     'rewards_dec': wandb.Histogram(rewards_dec.cpu(), num_bins=256),
@@ -376,10 +379,6 @@ if __name__ == '__main__':
                     'value_targets_dec': wandb.Histogram(value_targets_dec.cpu(), num_bins=256),
                     'value_preds_dec': wandb.Histogram(value_preds_dec.cpu(), num_bins=256),
                     'value_preds_actor': wandb.Histogram(value_preds_for_actor_dec[1:].cpu(), num_bins=256),
-                    'value_preds_actor_max': value_preds_for_actor_dec[1:].max().cpu(),
-                    'value_preds_actor_min': value_preds_for_actor_dec[1:].min().cpu(),
-                    'value_preds_actor_95th_percentile': value_preds_95th_percentile,
-                    'value_preds_actor_5th_percentile': value_preds_5th_percentile,
                 }, step=steps)
 
                 imagined_trajectory_viz = viz.visualize_imagined_trajectory(
