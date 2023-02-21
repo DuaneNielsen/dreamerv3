@@ -101,10 +101,18 @@ class Actor(nn.Module):
 
 
 class ActorLoss:
-    def __init__(self):
+    def __init__(self, return_normalization_limit=1.0, return_normalization_decay=0.99):
         self.reinforce_loss = None
         self.entropy_loss = None
         self.actor_loss = None
+        self.return_scale_running = None
+        self.return_normalization_limit = return_normalization_limit
+        self.return_normalization_decay = return_normalization_decay
+        self.applied_scale = 1.
+        self.value_preds_min = None
+        self.value_preds_5th_percentile = None
+        self.value_preds_95th_percentile = None
+        self.value_preds_max = None
 
     def __call__(self, actor_logits, actions, critic_values, mask=None):
         """
@@ -128,9 +136,19 @@ class ActorLoss:
 
         # critic values are shifted right, last action in trajectory is discarded
         # if the last action is the terminal, its going to be tha pad action anyway
+        with torch.no_grad():
+            self.value_preds_min = critic_values[1:].min()
+            self.value_preds_max = critic_values[1:].max()
+            self.value_preds_95th_percentile = torch.quantile(critic_values[1:], 0.95, interpolation='lower')
+            self.value_preds_5th_percentile = torch.quantile(critic_values[1:], 0.05, interpolation='higher')
+            return_scale_step = self.value_preds_95th_percentile - self.value_preds_5th_percentile
+            if self.return_scale_running is None:
+                self.return_scale_running = return_scale_step
+            self.return_scale_running = self.return_scale_running * self.return_normalization_decay + return_scale_step * (1. - self.return_normalization_decay)
+            self.applied_scale = max(self.return_scale_running.item(), 1.)
 
         actor_dist = OneHotCategoricalStraightThru(logits=actor_logits[:-1])
-        self.reinforce_loss = - critic_values[1:].detach() * actor_dist.log_prob(actions[:-1])
+        self.reinforce_loss = - critic_values[1:].detach() * actor_dist.log_prob(actions[:-1]) / self.applied_scale
         self.entropy_loss = - 3e-4 * actor_dist.entropy()
         if mask is not None:
             self.reinforce_loss = self.reinforce_loss * mask[:-1]
@@ -144,6 +162,11 @@ class ActorLoss:
         return {
             'actor_reinforce_loss': self.reinforce_loss.item(),
             'actor_entropy_loss': self.entropy_loss.item(),
+            'actor_returns_applied_scale:': self.applied_scale,
+            'actor_returns_min': self.value_preds_min.item(),
+            'actor_returns_5th_percentile': self.value_preds_5th_percentile.item(),
+            'actor_returns_95th_percentile': self.value_preds_95th_percentile.item(),
+            'actor_returns_max': self.value_preds_max.item(),
             'actor_loss': self.actor_loss.item()
         }
 
