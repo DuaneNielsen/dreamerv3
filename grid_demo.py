@@ -128,7 +128,7 @@ def rollout(env, actor, rssm):
         obs = obs.to(rssm.device).unsqueeze(0)
         h, z = rssm.step_reality(h, obs, action)
 
-        cont = 0. if terminated or truncated else 1.
+        cont = 0. if terminated else 1.
 
         if terminated or truncated:
             rssm.train()
@@ -185,7 +185,7 @@ if __name__ == '__main__':
     """
     action_table = {0: 'left', 1: 'right', 2: 'forward', 3: 'pickup'}
 
-    env = gridworld.make('turn_around')
+    env = gridworld.make('dont_look_back')
     env = gridworld.MaxStepsWrapper(env, max_steps=100)
     env = gridworld.RGBImageWrapper(env)
     env = gridworld.TensorObsWrapper(env)
