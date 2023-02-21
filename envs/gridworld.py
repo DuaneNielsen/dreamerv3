@@ -253,16 +253,15 @@ env_configs = {
     'the_choice': [
         'lUg'
     ],
-    'go_around': [
-        'eee',
-        'Rwg'
+    'dont_look_back': [
+        'weee',
+        'lRwg'
     ],
     'dont_fall': [
         'lll',
         'Reg',
         'lll'
     ]
-
 }
 
 
