@@ -18,10 +18,9 @@ from symlog import symlog, symexp
 import copy
 import utils
 import wandb
-from viz import make_batch_panels, make_panel
+from viz import make_batch_panels
 from wandb.data_types import Video
 import encoding
-from torch.distributions import OneHotCategorical
 import viz
 import envs.gridworld as gridworld
 import numpy as np
@@ -69,6 +68,21 @@ def log(obs, action, reward_gt, c, mask, obs_dist, reward_pred, c_dist, z_prior,
         }, step=step)
 
 
+def log_decoded_trajectory(latest_trajectory, steps):
+    decoded_trajectory = []
+    h = rssm.new_hidden0(batch_size=1)
+    z = rssm.encode_observation(h, latest_trajectory[0].obs.unsqueeze(0).to(args.device)).mode
+    for step in latest_trajectory:
+        decoded_trajectory += [symexp(rssm.decoder(h, z).mean)]
+        if step.act is None:
+            break
+        h, z = rssm.step_reality(h, step.obs.unsqueeze(0).to(args.device), step.act.unsqueeze(0).to(args.device))
+
+    decoded_trajectory = torch.stack(decoded_trajectory, dim=1)
+    decoded_trajectory = (decoded_trajectory * 255).to(dtype=torch.uint8, device='cpu').numpy()
+    wandb.log({'decoded_trajectory': wandb.Video(decoded_trajectory)}, step=steps)
+
+
 def prepro(x):
     x = torch.from_numpy(x['image']).permute(2, 0, 1).float() / 255.0
     return resize(x, [64, 64])
@@ -91,26 +105,6 @@ def random_policy(h, z):
 
 def random_policy_for_world_model(h, z):
     return one_hot(torch.randint(0, 4, [z.shape[0]]), 4).to(z.device).unsqueeze(1)
-
-
-#
-# def rollout(env, policy, rssm, seed=42):
-#     terminated, truncated = True, True
-#     while True:
-#         if terminated or truncated:
-#             (obs, _), r, c = env.reset(seed=seed), 0, 1.0
-#             obs_pre = prepro(obs).to(args.device).unsqueeze(0)
-#             h = rssm.new_hidden0(batch_size=1)
-#             z = rssm.encode_observation(h, obs_pre).mode
-#
-#         a = policy.sample_action(h, z)
-#         yield Step(obs_pre[0].detach().cpu(), a[0].detach().cpu(), r, c)
-#         obs, r, terminated, truncated, _ = env.step(a[0].argmax().item())
-#         obs_pre = prepro(obs).to(args.device).unsqueeze(0)
-#         h, z = rssm.step_reality(h, obs_pre, a)
-#         c = 0.0 if terminated else 1.0
-#         if terminated or truncated:
-#             yield Step(obs_pre[0].detach().cpu(), None, r, c)
 
 
 def rollout(env, actor, rssm):
@@ -255,14 +249,6 @@ if __name__ == '__main__':
     loader = BatchLoader(pad_observation=pad_state, pad_action=pad_action, obs_codec=obs_codec,
                          reward_codec=reward_codec, device=args.device)
 
-    # plt.ion()
-    # fig, ax = plt.subplots(1, 3)
-    # confusion_matrix = torch.zeros(256, 256)
-    # cm_plt = ax[0].imshow(confusion_matrix, cmap='gray')
-    #
-    # fig.canvas.draw()
-    # fig.canvas.flush_events()
-
     for _ in range(args.max_steps):
 
         training_time.go()
@@ -339,6 +325,9 @@ if __name__ == '__main__':
                     'trajectory_length': len(latest_trajectory),
                     'trajectory_viz': Video(trajectory_viz)
                 }, step=steps)
+
+                log_decoded_trajectory(latest_trajectory, steps)
+
                 print(f'trajectory end: reward {trajectory_reward} len: {len(latest_trajectory)}')
 
             if steps % args.log_every_n_steps == 0:
@@ -348,7 +337,6 @@ if __name__ == '__main__':
                 decoded_obs = obs_codec.decode(rssm.decoder(h, z).mean)
                 mask = mask.repeat(1 + args.imagination_horizon, 1, 1)
                 value_preds_dec = reward_codec.decode(value_preds_enc)
-
 
                 wandb.log({
                     'rewards_dec': wandb.Histogram(rewards_dec.cpu(), num_bins=256),

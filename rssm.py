@@ -249,7 +249,7 @@ class RSSM(nn.Module):
         :param h: [N, h_size]
         :param a: [N, a_size, a_cls ]
         :param z: [N, z_size, z_classes]
-        :return: x, r, c : observation, reward, continue
+        :return: h, z : hidden, z_prior
 
 
         """
