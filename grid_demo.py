@@ -310,36 +310,13 @@ if __name__ == '__main__':
         critic_loss = cross_entropy(value_preds_enc.flatten(0, 1), value_targets_enc.flatten(0, 1), reduction='none')
         critic_loss = critic_loss.mean()
 
-        # confusion_matrix = np.zeros((256, 256))
-        # bars_pred = np.zeros(256)
-        # bars_target = np.zeros(256)
-        # for pred, target in zip(value_preds_enc.argmax(-1).flatten(), value_targets_enc.argmax(-1).flatten()):
-        #     confusion_matrix[pred.item(), target.item()] += 1.
-        #     bars_pred[pred.item()] += 1
-        #     bars_target[target.item()] += 1
-        # confusion_matrix = confusion_matrix / np.max(confusion_matrix)
-        #
-        # ax[0].imshow(confusion_matrix)
-        # ax[1].cla()
-        # ax[1].bar(np.arange(256), bars_pred)
-        # ax[2].cla()
-        # ax[2].bar(np.arange(256), bars_target)
-        # fig.canvas.draw()
-        # fig.canvas.flush_events()
-        # plt.pause(0.01)
-
         critic_opt.zero_grad()
         critic_loss.backward()
         critic_opt.step()
         polyak_update(critic, ema_critic)
 
-        with torch.no_grad():
-            value_preds_for_actor_enc = critic(h, z)
-            value_preds_for_actor_dec = reward_codec.decode(value_preds_for_actor_enc)
-
-
         actor_logits = actor(h, z)
-        actor_loss = actor_criterion(actor_logits, a, value_preds_for_actor_dec)
+        actor_loss = actor_criterion(actor_logits, a, value_targets_dec)
 
         actor_opt.zero_grad()
         actor_loss.backward()
@@ -378,12 +355,12 @@ if __name__ == '__main__':
                     'value_ema_dec': wandb.Histogram(value_ema_dec.cpu(), num_bins=256),
                     'value_targets_dec': wandb.Histogram(value_targets_dec.cpu(), num_bins=256),
                     'value_preds_dec': wandb.Histogram(value_preds_dec.cpu(), num_bins=256),
-                    'value_preds_actor': wandb.Histogram(value_preds_for_actor_dec[1:].cpu(), num_bins=256),
+                    # 'value_preds_actor': wandb.Histogram(value_preds_for_actor_dec[1:].cpu(), num_bins=256),
                 }, step=steps)
 
                 imagined_trajectory_viz = viz.visualize_imagined_trajectory(
                     decoded_obs[:, :], a[:, :], rewards_dec[:, :], cont[:, :], mask[:, :],
-                    value_preds_for_actor_dec[:, :], action_table=action_table)
+                    value_targets_dec[:, :], action_table=action_table)
                 imagined_trajectory_viz = (imagined_trajectory_viz * 255).to(dtype=torch.uint8).cpu().numpy()
                 wandb.log({'imagined_trajectory': wandb.Video(imagined_trajectory_viz)}, step=steps)
                 logging_time.pause()
