@@ -7,7 +7,7 @@ from torch.nn.functional import conv1d
 from torchvision.transforms.functional import to_tensor
 from torchvision.utils import make_grid
 from replay import stack_trajectory
-from symlog import symexp
+from math import floor
 
 """
 https://matplotlib.org/stable/gallery/lines_bars_and_markers/scatter_hist.html#sphx-glr-gallery-lines-bars-and-markers-scatter-hist-py
@@ -98,16 +98,16 @@ class PlotImage:
             self.image.set_data(image)
 
 
-def make_caption(caption, width, height):
+def make_caption(caption, color=(255, 255, 255, 255), width=64, height=16):
     img = Image.new('RGB', (width, height))
-    d = ImageDraw.Draw(img)
-    d.text((1, 5), caption)
+    draw = ImageDraw.Draw(img)
+    draw.text((1, 5), caption, fill=color)
     return to_tensor(img)
 
 
-def add_caption_to_observation(caption_above_list, obs, caption_below_list, width=64, height=16):
-    top_captions = [make_caption(caption, width, height) for caption in caption_above_list]
-    bottom_captions = [make_caption(caption, width, height) for caption in caption_below_list]
+def add_caption_to_observation(caption_above_list, obs, caption_below_list):
+    top_captions = [make_caption(*caption) for caption in caption_above_list]
+    bottom_captions = [make_caption(*caption) for caption in caption_below_list]
     top_captions = torch.cat(top_captions, dim=1).to(obs.device)
     bottom_captions = torch.cat(bottom_captions, dim=1).to(obs.device)
     return torch.cat([top_captions, obs, bottom_captions], dim=1)
@@ -129,16 +129,25 @@ class CaptionedObsFactory:
             action_caption = f'action: {action.argmax().item()}'
 
         reward_caption = f'rew: {reward.item():.2f}'
-        cont_caption = f'con: {cont.item():.2f}'
+        if reward == 0.:
+            reward_color = (255, 255, 255, 255)
+        elif reward < 0.:
+            reward_color = (255, 0, 0, 255)
+        elif reward > 0.:
+            reward_color = (0, 255, 0, 255)
 
-        caption_below_list = [reward_caption, cont_caption]
+        cont_caption = f'con: {cont.item():.2f}'
+        cont_color = (floor(255 * (1-cont.item())), 180, floor(255 * cont.item()), 255)
+
+        caption_below_list = [(reward_caption, reward_color), (cont_caption, cont_color)]
 
         if value is not None:
             value_caption = f'val: {value.item():.2f}'
-            caption_below_list += [value_caption]
+            value_color = (255, 255, 255, 255)
+            caption_below_list += [(value_caption, value_color)]
 
         return add_caption_to_observation(
-            caption_above_list=[action_caption],
+            caption_above_list=[(action_caption, )],
             obs=obs,
             caption_below_list=caption_below_list
         )
