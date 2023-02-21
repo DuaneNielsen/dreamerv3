@@ -99,18 +99,54 @@ def decode_two_hot(twohot, lower=-20, upper=20, classes=256):
     return decoded_two_hot.unflatten(0, leading_dims).unsqueeze(-1)
 
 
-def two_hot_fast(input, lower, upper):
+def encode_range(input, upper, lower, classes):
     input = input.clamp(lower, upper)
+    scale = (classes - 1) / (upper - lower)
+    bias = lower
+    return (input - bias) / scale
+
+
+def decode_range(input, upper, lower, classes):
+    scale = (classes - 1) / (upper - lower)
+    bias = lower
+    return scale * input + bias
+
+
+def encode_two_hot_fast(input, classes):
     input_shape = input.shape
     input = input.flatten()
-    classes = upper - lower
-    two_hot = torch.zeros(input.size(0), classes, device=input.device)
+    two_hot = torch.zeros(input.size(0), classes + 1, device=input.device)
     k = torch.floor(input).long()
     remainder = torch.remainder(input, 1)
     two_hot[torch.arange(input.size(0)), k] = 1 - remainder
-    two_hot[torch.arange(input.size(0)), k+1] = remainder
+    two_hot[torch.arange(input.size(0)), k + 1] = remainder
+    two_hot = two_hot[:, :-1]
     two_hot = two_hot.unflatten(0, input_shape[0:-1])
     return two_hot
+
+
+def decode_two_hot_fast(input, classes):
+    input = input.flatten(0, -2)
+    k = input.argmax(-1)
+    k_left = (k - 1)
+    k_right = (k + 1).clamp(max=classes-1)
+    padded_input = torch.cat((torch.zeros(input.size(0), 1), input), dim=1)
+    value_k_left = padded_input[torch.arange(input.size(0)), k_left + 1]
+    value_k_right = input[torch.arange(input.size(0)), k_right]
+    left_greater = value_k_left.gt(value_k_right)
+    right_greater = torch.logical_not(left_greater)
+    major_weight = input[torch.arange(input.size(0)), k]
+    minor_weight = torch.zeros(input.size(0))
+    minor_weight[left_greater] = value_k_left[left_greater]
+    minor_weight[right_greater] = value_k_right[right_greater]
+    normalize_constant = major_weight + minor_weight
+    major_weight = major_weight / normalize_constant
+    minor_weight = minor_weight / normalize_constant
+    major_value = k
+    minor_value = torch.empty_like(k)
+    minor_value[left_greater] = k_left[left_greater]
+    minor_value[right_greater] = k_right[right_greater]
+    return major_value * major_weight + minor_value * minor_weight
 
 
 def encode_onehot(value, max_abs=8., bins=256):
@@ -120,8 +156,8 @@ def encode_onehot(value, max_abs=8., bins=256):
     returns (..., bins )one_hot vectors rounded to the nearest bin
     """
     value = value.clamp(-max_abs, max_abs).squeeze(-1)
-    value = value * ((bins-1)//2) / max_abs
-    value = torch.round(value).long() + (bins-1)//2
+    value = value * ((bins - 1) // 2) / max_abs
+    value = torch.round(value).long() + (bins - 1) // 2
     return one_hot(value, bins).float()
 
 
@@ -130,8 +166,8 @@ def decode_onehot(one_hot, max_abs=8., bins=256):
     param: value: (..., bins)
     returns (..., 1)
     """
-    value = one_hot.argmax(-1) - (bins-1)//2
-    value = value * max_abs / ((bins-1)//2)
+    value = one_hot.argmax(-1) - (bins - 1) // 2
+    value = value * max_abs / ((bins - 1) // 2)
     return value.unsqueeze(-1)
 
 
@@ -152,7 +188,7 @@ def dequantize(quantized_value, scale=8., bins=256):
     param: value: (..., bins)
     returns (..., 1)
     """
-    value = quantized_value - (bins-1)//2
+    value = quantized_value - (bins - 1) // 2
     value = value * scale / ((bins - 1) // 2)
     return value.unsqueeze(-1)
 
@@ -221,14 +257,13 @@ def make_codec(name):
 
 
 if __name__ == '__main__':
-
-    values_in = torch.tensor([-8., -1,  0., 1., 8.]).unsqueeze(-1)
+    values_in = torch.tensor([-8., -1, 0., 1., 8.]).unsqueeze(-1)
     values_in = torch.linspace(-8, 8, 1024).reshape(2, 512).unsqueeze(-1)
     one_hots = encode_onehot(values_in)
     values_out = decode_onehot(one_hots)
     assert torch.allclose(values_in, values_out, atol=0.05)
 
-    values_in = torch.tensor([-1., -0.4,  0., 1., 1.]).unsqueeze(-1)
+    values_in = torch.tensor([-1., -0.4, 0., 1., 1.]).unsqueeze(-1)
     values_in = torch.linspace(-1, 1, 1024).reshape(2, 512).unsqueeze(-1)
     one_hots = encode_onehot(values_in, max_abs=1.)
     values_out = decode_onehot(one_hots, max_abs=1.)
@@ -264,6 +299,29 @@ if __name__ == '__main__':
     values_out = one_hot_encoder.decode(one_hots)
     assert torch.allclose(values_in, values_out, atol=0.05)
 
+    values_in = torch.tensor([-11, -5, 0., 5., 9])
+    rescale = Codec(encoder=encode_range, decoder=decode_range, upper=9, lower=-11, classes=20)
+    rescaled = rescale.encode(values_in)
+    values_out = rescale.decode(rescaled)
+    assert torch.allclose(values_in, values_out)
+
+    values_in = torch.tensor([0., 0.5,  254.5, 255.]).unsqueeze(-1)
+    values_in = torch.linspace(0., 255., 100).unsqueeze(-1)
+    twohot = encode_two_hot_fast(values_in, classes=256)
+    values_out = decode_two_hot_fast(twohot, classes=256)
+    print(twohot)
+    print(values_out)
+
+    twohot_codec = CodecStack(codecs=[
+        Codec(encoder=encode_range, decoder=decode_range, lower=-20, upper=20, classes=256),
+        Codec(encoder=encode_two_hot_fast, decoder=decode_two_hot_fast, classes=256)
+    ])
+    values_in = torch.linspace(-20., 20, 100).unsqueeze(-1)
+    twohot = twohot_codec.encode(values_in)
+    values_out = twohot_codec.decode(twohot).unsqueeze(-1)
+    for v_in, v_out in zip(values_in, values_out):
+        print(v_in, v_out)
+    assert(values_in.allclose(values_out))
 
     # lower = 0.
     # upper = 1.0
