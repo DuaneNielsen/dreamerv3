@@ -33,38 +33,16 @@ def log(obs, action, reward_gt, c, mask, obs_dist, reward_pred, c_dist, z_prior,
                               reward_pred, c_dist.probs, mask,
                               action_table=action_table)
 
-        class_labels = utils.bin_labels(0., 1., num_bins=5)
-        reward_gt = reward_gt[mask].flatten().cpu()
-        reward_mean = reward_pred[mask].flatten().cpu()
-        reward_gt_binned = utils.bin_values(reward_gt, 0., 1., num_bins=5).numpy()
-        reward_mean_binned = utils.bin_values(reward_mean, 0., 1., num_bins=5).numpy()
-        cont_gt = c[mask].flatten().cpu()
-        cont_probs = c_dist.probs[mask].flatten().cpu()
-        cont_gt_binned = utils.bin_values(cont_gt, 0., 1., 5).numpy()
-        cont_probs_binned = utils.bin_values(cont_probs, 0., 1., 5).numpy()
-
-        z_prior_argmax, z_post_argmax = z_prior.argmax(-1).flatten().cpu().numpy(), z_post.argmax(
-            -1).flatten().cpu().numpy()
-        z_labels = [f'{l:02d}' for l in list(range(32))]
-
         wandb.log({
             'batch_panel': wandb.Image(batch_panel),
             'nonzero_rewards_panel': wandb.Image(rewards_panel),
             'terminal_state_panel': wandb.Image(terminal_panel),
-            'reward_gt': wandb.Histogram(reward_gt, num_bins=5),
-            'reward_pred': wandb.Histogram(reward_mean, num_bins=5),
-            'reward_confusion': wandb.plot.confusion_matrix(y_true=reward_gt_binned,
-                                                            preds=reward_mean_binned,
-                                                            class_names=class_labels),
-            'cont_gt': wandb.Histogram(cont_gt, num_bins=5),
-            'cont_probs': wandb.Histogram(cont_probs, num_bins=5),
-            'cont_confusion': wandb.plot.confusion_matrix(y_true=cont_gt_binned,
-                                                          preds=cont_probs_binned,
-                                                          class_names=class_labels),
-            'z_post': wandb.Histogram(z_post_argmax),
-            'z_prior': wandb.Histogram(z_prior_argmax),
-            'z_prior_z_post_confusion': wandb.plot.confusion_matrix(y_true=z_prior_argmax, preds=z_post_argmax,
-                                                                    class_names=z_labels),
+            'reward_gt': wandb.Histogram(reward_gt[mask].flatten().cpu(), num_bins=256),
+            'reward_pred': wandb.Histogram(reward_pred[mask].flatten().cpu(), num_bins=256),
+            'cont_gt': wandb.Histogram(c[mask].flatten().cpu(), num_bins=5),
+            'cont_probs': wandb.Histogram(c_dist.probs[mask].flatten().cpu(), num_bins=5),
+            'z_prior': wandb.Histogram(z_prior.argmax(-1).flatten().cpu().numpy(), num_bins=32),
+            'z_post': wandb.Histogram(z_post.argmax(-1).flatten().cpu().numpy()),
         }, step=step)
 
 
@@ -245,7 +223,7 @@ if __name__ == '__main__':
         print(f'resuming from step {steps} of {args.resume} with {resume_args}')
 
     obs_codec = encoding.make_codec('symlog')
-    reward_codec = encoding.make_codec('symlog_onehot')
+    reward_codec = encoding.make_codec('symlog')
     loader = BatchLoader(pad_observation=pad_state, pad_action=pad_action, obs_codec=obs_codec,
                          reward_codec=reward_codec, device=args.device)
 
@@ -259,8 +237,8 @@ if __name__ == '__main__':
         obs, act, reward_enc, cont, mask = loader.sample(buff, args.batch_length, args.batch_size)
 
         h0 = rssm.new_hidden0(args.batch_size)
-        obs_dist, reward_preds_enc, cont_dist, z_prior, z_post = rssm(obs, act, h0)
-        rssm_loss = criterion(obs, reward_enc, cont, mask, obs_dist, reward_preds_enc, cont_dist, z_prior, z_post)
+        obs_dist, rewards_pred_dist, cont_dist, z_prior, z_post = rssm(obs, act, h0)
+        rssm_loss = criterion(obs, reward_enc, cont, mask, obs_dist, rewards_pred_dist, cont_dist, z_prior, z_post)
 
         rssm_opt.zero_grad()
         rssm_loss.backward()
@@ -273,7 +251,7 @@ if __name__ == '__main__':
             if steps % args.log_every_n_steps == 0:
                 logging_time.go()
                 reward_symlog_dec = reward_codec.decode(reward_enc)
-                reward_preds_dec = reward_codec.decode(reward_preds_enc)
+                reward_preds_dec = reward_codec.decode(rewards_pred_dist.mean).unsqueeze(-1)
                 log(obs, act, reward_symlog_dec, cont, mask, obs_dist, reward_preds_dec, cont_dist, z_prior, z_post,
                     steps)
                 logging_time.pause()
@@ -286,15 +264,14 @@ if __name__ == '__main__':
             h, z, a, rewards_enc, cont = \
                 rssm.imagine(h0, obs[0], reward[0], cont[0], actor, imagination_horizon=args.imagination_horizon)
 
-            values_ema_enc = ema_critic(h, z)
-            value_ema_dec = reward_codec.decode(values_ema_enc)
+            values_ema_dist = ema_critic(h, z)
+            value_ema_dec = reward_codec.decode(values_ema_dist.mean.unsqueeze(-1))
             rewards_dec = reward_codec.decode(rewards_enc)
             value_targets_dec = td_lambda(rewards_dec, cont, value_ema_dec)
             value_targets_enc = reward_codec.encode(value_targets_dec)
 
-        value_preds_enc = critic(h, z)
-        critic_loss = cross_entropy(value_preds_enc.flatten(0, 1), value_targets_enc.flatten(0, 1), reduction='none')
-        critic_loss = critic_loss.mean()
+        value_preds_dist = critic(h, z)
+        critic_loss = - value_preds_dist.log_prob(value_targets_enc).mean()
 
         critic_opt.zero_grad()
         critic_loss.backward()
@@ -314,6 +291,8 @@ if __name__ == '__main__':
 
             wandb.log(actor_criterion.loss_dict(), step=steps)
             wandb.log({'critic_loss': critic_loss.item()}, step=steps)
+            # wandb.log({'critic_bias': critic.out_layer.bias.data[127],
+            #            'reward_bias': rssm.reward_pred.output.bias.data[127]}, step=steps)
 
             if replay.is_trajectory_end(buff[-1]):
                 latest_trajectory = replay.get_tail_trajectory(buff)
@@ -336,7 +315,7 @@ if __name__ == '__main__':
 
                 decoded_obs = obs_codec.decode(rssm.decoder(h, z).mean)
                 mask = mask.repeat(1 + args.imagination_horizon, 1, 1)
-                value_preds_dec = reward_codec.decode(value_preds_enc)
+                value_preds_dec = reward_codec.decode(value_preds_dist.mean.unsqueeze(-1))
 
                 wandb.log({
                     'rewards_dec': wandb.Histogram(rewards_dec.cpu(), num_bins=256),

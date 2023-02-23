@@ -103,16 +103,22 @@ def encode_range(input, upper, lower, classes):
     input = input.clamp(lower, upper)
     scale = (classes - 1) / (upper - lower)
     bias = lower
-    return (input - bias) / scale
+    return (input - bias) * scale
 
 
 def decode_range(input, upper, lower, classes):
     scale = (classes - 1) / (upper - lower)
     bias = lower
-    return scale * input + bias
+    value = input / scale + bias
+    return value.clamp(lower, upper)
 
 
 def encode_two_hot_fast(input, classes):
+    """
+    param: input: (..., 1)
+    param: classes: number of classes to use for enconding
+    return (..., classes)
+    """
     input_shape = input.shape
     input = input.flatten()
     two_hot = torch.zeros(input.size(0), classes + 1, device=input.device)
@@ -126,27 +132,37 @@ def encode_two_hot_fast(input, classes):
 
 
 def decode_two_hot_fast(input, classes):
+    """
+    param: input: (..., classes)
+    param: classes: number of classes to decode
+    return (..., 1)
+    """
+    input_shape = input.shape
     input = input.flatten(0, -2)
     k = input.argmax(-1)
     k_left = (k - 1)
     k_right = (k + 1).clamp(max=classes-1)
-    padded_input = torch.cat((torch.zeros(input.size(0), 1), input), dim=1)
+    padded_input = torch.cat((torch.zeros(input.size(0), 1, device=input.device), input), dim=1)
     value_k_left = padded_input[torch.arange(input.size(0)), k_left + 1]
     value_k_right = input[torch.arange(input.size(0)), k_right]
     left_greater = value_k_left.gt(value_k_right)
     right_greater = torch.logical_not(left_greater)
     major_weight = input[torch.arange(input.size(0)), k]
-    minor_weight = torch.zeros(input.size(0))
+    minor_weight = torch.zeros(input.size(0), device=input.device)
     minor_weight[left_greater] = value_k_left[left_greater]
     minor_weight[right_greater] = value_k_right[right_greater]
-    normalize_constant = major_weight + minor_weight
-    major_weight = major_weight / normalize_constant
-    minor_weight = minor_weight / normalize_constant
+
+    norm = major_weight + minor_weight + torch.finfo(torch.float32).eps
+    major_weight = (major_weight / norm).float()
+    minor_weight = (minor_weight / norm).float()
+
     major_value = k
     minor_value = torch.empty_like(k)
     minor_value[left_greater] = k_left[left_greater]
     minor_value[right_greater] = k_right[right_greater]
-    return major_value * major_weight + minor_value * minor_weight
+    value = major_value * major_weight + minor_value * minor_weight
+    value = value.unflatten(0, input_shape[0:-1]).unsqueeze(-1)
+    return value
 
 
 def encode_onehot(value, max_abs=8., bins=256):
@@ -231,7 +247,7 @@ class CodecStack:
 
     def encode(self, data):
         for codec in self.codecs:
-            data = codec.encode(data)
+            data = codec.encode_two_hot(data)
         return data
 
     def decode(self, data):
@@ -243,7 +259,7 @@ class CodecStack:
 def make_codec(name):
     if name == 'onehot':
         return Codec(encoder=encode_onehot, decoder=decode_onehot, max_abs=1., bins=256)
-    if name == 'symlog_onehot':
+    if name == 'quantized_onehot':
         permute_map_256 = torch.arange(256)
         permute_map_256[0] = 127
         permute_map_256[1:128] = torch.arange(127)
@@ -254,6 +270,13 @@ def make_codec(name):
         ])
     if name == 'symlog':
         return Codec(encoder=symlog.symlog, decoder=symlog.symexp)
+    if name == 'symlog_twohot':
+        return CodecStack(codecs=[
+            Codec(encoder=symlog.symlog, decoder=symlog.symexp),
+            Codec(encoder=encode_range, decoder=decode_range, lower=-20, upper=20, classes=256),
+            Codec(encoder=encode_two_hot_fast, decoder=decode_two_hot_fast, classes=256)
+        ])
+    raise Exception(f'{name} is not a valid encoding')
 
 
 if __name__ == '__main__':
@@ -318,10 +341,18 @@ if __name__ == '__main__':
     ])
     values_in = torch.linspace(-20., 20, 100).unsqueeze(-1)
     twohot = twohot_codec.encode(values_in)
-    values_out = twohot_codec.decode(twohot).unsqueeze(-1)
+    values_out = twohot_codec.decode(twohot)
     for v_in, v_out in zip(values_in, values_out):
         print(v_in, v_out)
-    assert(values_in.allclose(values_out))
+
+    symlog_twohot_codec = make_codec('symlog_twohot')
+    values_in = torch.tensor([0., 0., 0.]).unsqueeze(-1)
+    values_twohot = symlog_twohot_codec.encode(values_in)
+    values_out = symlog_twohot_codec.decode(values_twohot)
+    print(values_in)
+    print(symlog.symlog(values_in))
+    print(values_twohot.argmax(-1))
+    print(values_out)
 
     # lower = 0.
     # upper = 1.0

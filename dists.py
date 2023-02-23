@@ -1,6 +1,7 @@
 import torch
 from torch.nn.functional import softmax
 from torch.distributions import OneHotCategorical, kl_divergence
+from torch.nn.functional import one_hot
 
 
 def sample_one_hot(logits, epsilon=0.01):
@@ -32,9 +33,78 @@ def categorical_kl_divergence_clamped(logits_left, logits_right, clamp=1.):
     ).clamp(max=clamp)
 
 
+class EncodeTwoHot:
+    def __init__(self, low, high, num_bins, device='cpu'):
+        self.bins = torch.linspace(low, high, num_bins).to(device)
+        self.num_bins = num_bins
+
+    def __call__(self, value):
+        below = (self.bins <= value[..., None]).to(dtype=torch.long).sum(-1) - 1
+        above = self.num_bins - (self.bins > value[..., None]).to(dtype=torch.long).sum(-1)
+        below = below.clamp(0, self.num_bins - 1)
+        above = above.clamp(0, self.num_bins - 1)
+        equal = below == above
+        dist_to_below = torch.where(equal, 1., torch.abs(self.bins[below] - value))
+        dist_to_above = torch.where(equal, 1., torch.abs(self.bins[above] - value))
+        total = dist_to_below + dist_to_above
+        weight_below = dist_to_above / total
+        weight_above = dist_to_below / total
+        return one_hot(below, self.num_bins) * weight_below[..., None] + one_hot(above, self.num_bins) * weight_above[..., None]
+
+
+class TwoHot:
+    """
+    Interprets logits as a two hot distribution
+    param: logits: [..., bins] logits
+    param: low: the lowest value represented
+    param: high: the highest value represented
+    """
+    def __init__(self, logits, low=-20, high=20.):
+        self.logits = logits
+        self.encode_two_hot = EncodeTwoHot(low, high, logits.shape[-1], device=logits.device)
+
+    @property
+    def mean(self):
+        return (torch.softmax(self.logits, -1) * self.encode_two_hot.bins).sum(-1)
+
+    def log_prob(self, value):
+        """
+        param: value: [...] values
+        """
+        target = self.encode_two_hot(value)
+        log_pred = self.logits - torch.logsumexp(self.logits, dim=-1, keepdim=True)
+        return (target * log_pred).sum(-1)
+
 
 if __name__ == '__main__':
 
     for i in range(10):
         OneHotCategoricalStraightThru(logits=torch.randn(10, 1, 4)).log_prob(
             OneHotCategoricalStraightThru(logits=torch.randn(10, 1, 4)).sample())
+
+    x = torch.linspace(0, 10, 10).unsqueeze(0)
+    encode_two_hot = EncodeTwoHot(0, 10, 5)
+    print(encode_two_hot(x))
+
+    dist_values = torch.linspace(-20, 20, 200)
+    encode_two_hot = EncodeTwoHot(-20, 20, 256)
+    logits = encode_two_hot(dist_values)
+    value = torch.zeros(200)
+    dist = TwoHot(logits, low=-20, high=20)
+    logprobs = dist.log_prob(value)
+
+    from torch.nn import Linear
+    from torch.optim import Adam
+
+    net = Linear(1, 256)
+    optim = Adam(net.parameters(), lr=1e-2)
+
+    for _ in range(10000):
+        logits = net(dist_values.unsqueeze(1))
+        twohot_dist = TwoHot(logits, low=-20, high=20)
+        loss = - twohot_dist.log_prob(dist_values).mean()
+        optim.zero_grad()
+        loss.backward()
+        optim.step()
+
+    print(twohot_dist.mean())

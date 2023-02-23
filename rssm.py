@@ -27,10 +27,10 @@
 import torch
 import torch.nn as nn
 from torch.distributions import OneHotCategorical, Normal, Bernoulli
-from dists import OneHotCategoricalStraightThru, categorical_kl_divergence_clamped
+from dists import OneHotCategoricalStraightThru, categorical_kl_divergence_clamped, TwoHot
 from blocks import MLPBlock, ModernDecoderConvBlock, Embedder, DecoderConvBlock
 from torch.nn.functional import cross_entropy
-from encoding import decode_onehot, encode_onehot
+
 
 class Encoder(nn.Module):
     def __init__(self, cnn_multi=32, mlp_layers=2, mlp_hidden=512, h_size=512):
@@ -101,19 +101,19 @@ class RewardPredictor(nn.Module):
     def __init__(self, h_size=512, mlp_size=512, mlp_layers=2):
         super().__init__()
 
-        output = nn.Linear(mlp_size, 256, bias=False)
-        # output.weight.data.zero_()
-        # output.bias.data.zero_()
-        # output.bias.data[127] = 1e-8
+        self.output = nn.Linear(mlp_size, 256, bias=False)
+        self.output.weight.data.zero_()
+        # self.output.bias.data.zero_()
+        # self.output.bias.data[127] = 1e-6
 
         self.reward_predictor = nn.Sequential(
             MLPBlock(h_size, mlp_size),
             *[MLPBlock(mlp_size, mlp_size) for _ in range(mlp_layers - 1)],
-            output
+            self.output
         )
 
     def forward(self, h):
-        return self.reward_predictor(h)
+        return TwoHot(self.reward_predictor(h), low=-20., high=20.)
 
 
 class ContinuePredictor(nn.Module):
@@ -272,7 +272,7 @@ class RSSM(nn.Module):
 
         h = self.seq_model(z, a, h)
         z_imagine = OneHotCategorical(logits=self.dynamics_pred(h)).sample()
-        reward = self.reward_pred(h)
+        reward = self.reward_pred(h).mean.unsqueeze(-1)
         cont = self.continue_pred(h).probs
         return h, z_imagine, reward, cont
 
@@ -322,11 +322,9 @@ class RSSMLoss:
         self.loss_rep = None
         self.loss = None
 
-    def __call__(self, obs, reward_encoded, cont, mask, obs_dist, reward_logits, cont_dist, z_prior_logits, z_post_logits):
+    def __call__(self, obs, reward_encoded, cont, mask, obs_dist, reward_dist, cont_dist, z_prior_logits, z_post_logits):
         self.loss_obs = - obs_dist.log_prob(obs).flatten(start_dim=2) * mask
-        reward_onehot_encoded = reward_encoded * mask
-        reward_logits = reward_logits * mask
-        self.loss_reward = cross_entropy(reward_logits.flatten(0, 1), reward_onehot_encoded.flatten(0, 1))
+        self.loss_reward = - reward_dist.log_prob(reward_encoded.squeeze(-1)) * mask.squeeze(-1)
         self.loss_cont = - cont_dist.log_prob(cont) * mask
         self.loss_dyn = 0.5 * categorical_kl_divergence_clamped(z_prior_logits.detach(), z_post_logits) * mask
         self.loss_rep = 0.1 * categorical_kl_divergence_clamped(z_prior_logits, z_post_logits.detach()) * mask

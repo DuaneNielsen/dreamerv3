@@ -129,12 +129,14 @@ class CaptionedObsFactory:
             action_caption = f'action: {action.argmax().item()}'
 
         reward_caption = f'rew: {reward.item():.2f}'
-        if reward == 0.:
+        if - 0.1 < reward < 0.1:
             reward_color = (255, 255, 255, 255)
-        elif reward < 0.:
+        elif reward < -0.1:
             reward_color = (255, 0, 0, 255)
-        elif reward > 0.:
+        elif reward > 0.1:
             reward_color = (0, 255, 0, 255)
+        else:
+            reward_color = (255, 255, 0, 255)
 
         cont_caption = f'con: {cont.item():.2f}'
         cont_color = (floor(255 * (1-cont.item())), 180, floor(255 * cont.item()), 255)
@@ -218,7 +220,7 @@ def make_batch_panels(obs, action, reward, cont, obs_pred, reward_pred, cont_pre
     batch_panel = make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask,
                                      batch_filter_mask, action_table=action_table)
 
-    rewards_filter = reward.squeeze() != 0.0
+    rewards_filter = (reward.abs().squeeze() > 0.1) & mask.squeeze()
     rewards_panel = make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask,
                                        rewards_filter, action_table=action_table)
 
