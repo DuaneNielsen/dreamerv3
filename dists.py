@@ -2,6 +2,7 @@ import torch
 from torch.nn.functional import softmax
 from torch.distributions import OneHotCategorical, kl_divergence
 from torch.nn.functional import one_hot
+from symlog import symlog, symexp
 
 
 def sample_one_hot(logits, epsilon=0.01):
@@ -76,6 +77,23 @@ class TwoHot:
         return (target * log_pred).sum(-1)
 
 
+class TwoHotSymlog(TwoHot):
+    """
+    Interprets logits as a two hot distribution in symlog space
+    param: logits
+    """
+    def __init__(self, logits):
+        super().__init__(logits)
+
+    @property
+    def mean(self):
+        return symexp(super().mean)
+
+    def log_prob(self, value):
+        value = symlog(value)
+        return super().log_prob(value)
+
+
 if __name__ == '__main__':
 
     for i in range(10):
@@ -92,14 +110,15 @@ if __name__ == '__main__':
     value = torch.zeros(200)
     dist = TwoHot(logits, low=-20, high=20)
     logprobs = dist.log_prob(value)
+    print(dist.mean)
 
     from torch.nn import Linear
-    from torch.optim import Adam
+    from torch.optim import SGD
 
     net = Linear(1, 256)
-    optim = Adam(net.parameters(), lr=1e-2)
+    optim = SGD(net.parameters(), lr=1e-1)
 
-    for _ in range(10000):
+    for _ in range(4000):
         logits = net(dist_values.unsqueeze(1))
         twohot_dist = TwoHot(logits, low=-20, high=20)
         loss = - twohot_dist.log_prob(dist_values).mean()
@@ -107,4 +126,4 @@ if __name__ == '__main__':
         loss.backward()
         optim.step()
 
-    print(twohot_dist.mean())
+    print(twohot_dist.mean)

@@ -3,7 +3,6 @@ import matplotlib.pyplot as plt
 from gymnasium import RewardWrapper
 from minigrid.wrappers import RGBImgObsWrapper
 
-import encoding
 import replay
 from replay import BatchLoader, Step
 from collections import deque
@@ -14,36 +13,15 @@ from critic import Critic, td_lambda, polyak_update, Actor, ActorLoss
 import torch
 from torch.optim import Adam
 from argparse import ArgumentParser
-from symlog import symlog, symexp
 import copy
 import utils
 import wandb
 from viz import make_batch_panels
 from wandb.data_types import Video
-import encoding
 import viz
 import envs.gridworld as gridworld
 import numpy as np
 
-
-def log(obs, action, reward_gt, c, mask, obs_dist, reward_pred, c_dist, z_prior, z_post, step):
-    with torch.no_grad():
-        batch_panel, rewards_panel, terminal_panel = \
-            make_batch_panels(obs, action, reward_gt, cont, obs_dist.mean,
-                              reward_pred, c_dist.probs, mask,
-                              action_table=action_table)
-
-        wandb.log({
-            'batch_panel': wandb.Image(batch_panel),
-            'nonzero_rewards_panel': wandb.Image(rewards_panel),
-            'terminal_state_panel': wandb.Image(terminal_panel),
-            'reward_gt': wandb.Histogram(reward_gt[mask].flatten().cpu(), num_bins=256),
-            'reward_pred': wandb.Histogram(reward_pred[mask].flatten().cpu(), num_bins=256),
-            'cont_gt': wandb.Histogram(c[mask].flatten().cpu(), num_bins=5),
-            'cont_probs': wandb.Histogram(c_dist.probs[mask].flatten().cpu(), num_bins=5),
-            'z_prior': wandb.Histogram(z_prior.argmax(-1).flatten().cpu().numpy(), num_bins=32),
-            'z_post': wandb.Histogram(z_post.argmax(-1).flatten().cpu().numpy()),
-        }, step=step)
 
 
 def log_decoded_trajectory(latest_trajectory, steps):
@@ -51,7 +29,7 @@ def log_decoded_trajectory(latest_trajectory, steps):
     h = rssm.new_hidden0(batch_size=1)
     z = rssm.encode_observation(h, latest_trajectory[0].obs.unsqueeze(0).to(args.device)).mode
     for step in latest_trajectory:
-        decoded_trajectory += [symexp(rssm.decoder(h, z).mean)]
+        decoded_trajectory += [rssm.decoder(h, z).mean]
         if step.act is None:
             break
         h, z = rssm.step_reality(h, step.obs.unsqueeze(0).to(args.device), step.act.unsqueeze(0).to(args.device))
@@ -59,30 +37,6 @@ def log_decoded_trajectory(latest_trajectory, steps):
     decoded_trajectory = torch.stack(decoded_trajectory, dim=1)
     decoded_trajectory = (decoded_trajectory * 255).to(dtype=torch.uint8, device='cpu').numpy()
     wandb.log({'decoded_trajectory': wandb.Video(decoded_trajectory)}, step=steps)
-
-
-def prepro(x):
-    x = torch.from_numpy(x['image']).permute(2, 0, 1).float() / 255.0
-    return resize(x, [64, 64])
-
-
-class RepeatOpenLoopPolicy:
-    def __init__(self, actions):
-        self.i = 0
-        self.actions = actions
-
-    def __call__(self, x):
-        a = self.actions[self.i]
-        self.i = (self.i + 1) % len(self.actions)
-        return one_hot(torch.tensor([a]), 4)
-
-
-def random_policy(h, z):
-    return one_hot(torch.randint(0, 4, [1]), 4)
-
-
-def random_policy_for_world_model(h, z):
-    return one_hot(torch.randint(0, 4, [z.shape[0]]), 4).to(z.device).unsqueeze(1)
 
 
 def rollout(env, actor, rssm):
@@ -122,6 +76,104 @@ def rollout(env, actor, rssm):
             reward, terminated, truncated, cont = 0.0, False, False, 1.
 
 
+def train_world_model(buff, rssm, rssm_opt, rssm_criterion, step=None):
+    obs, action, reward, cont, mask = loader.sample(buff, args.batch_length, args.batch_size)
+
+    h0 = rssm.new_hidden0(args.batch_size)
+    obs_dist, reward_dist, cont_dist, z_prior, z_post = rssm(obs, action, h0)
+    rssm_loss = rssm_criterion(obs, reward, cont, mask, obs_dist, reward_dist, cont_dist, z_prior, z_post)
+
+    rssm_opt.zero_grad()
+    rssm_loss.backward()
+    rssm_opt.step()
+
+    with torch.no_grad():
+        wandb.log(rssm_criterion.loss_dict(), step=step)
+        if step % args.log_every_n_steps == 0:
+            with torch.no_grad():
+                batch_panel, rewards_panel, terminal_panel = \
+                    make_batch_panels(obs, action, reward, cont, obs_dist.mean,
+                                      reward_dist.mean.unsqueeze(-1), cont_dist.probs, mask,
+                                      action_table=action_table)
+
+                wandb.log({
+                    'batch_panel': wandb.Image(batch_panel),
+                    'nonzero_rewards_panel': wandb.Image(rewards_panel),
+                    'terminal_state_panel': wandb.Image(terminal_panel),
+                    'reward_gt': wandb.Histogram(reward[mask].flatten().cpu(), num_bins=256),
+                    'reward_pred': wandb.Histogram(reward_dist.mean.unsqueeze(-1)[mask].flatten().cpu(), num_bins=256),
+                    'cont_gt': wandb.Histogram(cont[mask].flatten().cpu(), num_bins=5),
+                    'cont_probs': wandb.Histogram(cont_dist.probs[mask].flatten().cpu(), num_bins=5),
+                    'z_prior': wandb.Histogram(z_prior.argmax(-1).flatten().cpu().numpy(), num_bins=32),
+                    'z_post': wandb.Histogram(z_post.argmax(-1).flatten().cpu().numpy()),
+                }, step=step)
+
+
+def train_actor_critic(buff, rssm, critic, critic_opt, ema_critic, actor, actor_opt, actor_criterion, step=None):
+    with torch.no_grad():
+        obs, act, reward, cont, mask = loader.sample(buff, batch_length=1, batch_size=args.batch_size)
+        h0 = rssm.new_hidden0(args.batch_size)
+        h, z, a, rewards, cont = \
+            rssm.imagine(h0, obs[0], reward[0], cont[0], actor, imagination_horizon=args.imagination_horizon)
+
+        values_ema_dist = ema_critic(h, z)
+        value_ema = values_ema_dist.mean.unsqueeze(-1)
+        value_targets = td_lambda(rewards, cont, value_ema)
+
+    value_preds_dist = critic(h, z)
+    critic_loss = - value_preds_dist.log_prob(value_targets).mean()
+
+    critic_opt.zero_grad()
+    critic_loss.backward()
+    critic_opt.step()
+    polyak_update(critic, ema_critic)
+
+    actor_logits = actor(h, z)
+    actor_loss = actor_criterion(actor_logits, a, value_targets)
+
+    actor_opt.zero_grad()
+    actor_loss.backward()
+    actor_opt.step()
+
+    with torch.no_grad():
+
+        wandb.log(actor_criterion.loss_dict(), step=step)
+        wandb.log({'critic_loss': critic_loss.item()}, step=step)
+
+        if replay.is_trajectory_end(buff[-1]):
+            latest_trajectory = replay.get_tail_trajectory(buff)
+            trajectory_reward = replay.total_reward(latest_trajectory)
+            trajectory_viz = viz.visualize_trajectory(latest_trajectory, pad_action, action_table=action_table)
+            trajectory_viz = (trajectory_viz * 255).to(dtype=torch.uint8).numpy()
+            wandb.log({
+                'trajectory_reward': trajectory_reward,
+                'trajectory_length': len(latest_trajectory),
+                'trajectory_viz': Video(trajectory_viz)
+            }, step=step)
+
+            log_decoded_trajectory(latest_trajectory, step)
+
+            print(f'trajectory end: reward {trajectory_reward} len: {len(latest_trajectory)}')
+
+        if step % args.log_every_n_steps == 0:
+
+            obs_imagined = rssm.decoder(h, z).mean
+            mask = mask.repeat(1 + args.imagination_horizon, 1, 1)
+
+            wandb.log({
+                'rewards_dec': wandb.Histogram(rewards.cpu(), num_bins=256),
+                'value_ema_dec': wandb.Histogram(value_ema.cpu(), num_bins=256),
+                'value_targets_dec': wandb.Histogram(value_targets.cpu(), num_bins=256),
+                'value_preds_dec': wandb.Histogram(value_preds_dist.mean.cpu(), num_bins=256),
+            }, step=step)
+
+            imagined_trajectory_viz = viz.visualize_imagined_trajectory(
+                obs_imagined[:, :], a[:, :], rewards[:, :], cont[:, :], mask[:, :],
+                value_targets[:, :], action_table=action_table)
+            imagined_trajectory_viz = (imagined_trajectory_viz * 255).to(dtype=torch.uint8).cpu().numpy()
+            wandb.log({'imagined_trajectory': wandb.Video(imagined_trajectory_viz)}, step=step)
+
+
 if __name__ == '__main__':
 
     parser = ArgumentParser()
@@ -158,10 +210,9 @@ if __name__ == '__main__':
     |    0 | left    | Turn left         |
     |    1 | right   | Turn right        |
     |    2 | forward | Move forward      |
-    |    3 | pickup  | Pick up an object |
     +------+---------+-------------------+    
     """
-    action_table = {0: 'left', 1: 'right', 2: 'forward', 3: 'pickup'}
+    action_table = {0: 'left', 1: 'right', 2: 'forward'}
 
     env = gridworld.make('dont_look_back')
     env = gridworld.MaxStepsWrapper(env, max_steps=100)
@@ -169,20 +220,7 @@ if __name__ == '__main__':
     env = gridworld.TensorObsWrapper(env)
     env = gridworld.OneHotTensorActionWrapper(env)
 
-
-    class RewardOneOrZeroOnlyWrapper(RewardWrapper):
-        def __init__(self, env):
-            super().__init__(env)
-
-        def reward(self, reward):
-            return 0. if reward == 0. else 1.
-
-
-    # env = gym.make("MiniGrid-Empty-5x5-v0")
-    # env = RewardOneOrZeroOnlyWrapper(env)
-
     pad_state = torch.zeros(3, 64, 64, dtype=torch.uint8)
-    # pad_action = one_hot(torch.tensor([0]), 4)
     pad_action = one_hot(torch.tensor([0]), args.env_action_classes)
 
     rssm = make_small(action_classes=args.env_action_classes).to(args.device)
@@ -196,7 +234,7 @@ if __name__ == '__main__':
 
 
     register_gradient_clamp(rssm, args.world_model_gradient_clipping)
-    criterion = RSSMLoss()
+    rssm_criterion = RSSMLoss()
 
     critic = Critic()
     ema_critic = copy.deepcopy(critic)
@@ -213,127 +251,19 @@ if __name__ == '__main__':
     for i in range(20):
         buff += [next(gen)]
 
-    steps = 0
-    training_time = utils.StopWatch()
-    logging_time = utils.StopWatch()
-
     if args.resume:
         rssm, rssm_optim, critic, critic_optim, actor, actor_optim, steps, resume_args = \
             utils.load(args.resume, rssm, rssm_opt, critic, critic_opt, actor, actor_opt)
         print(f'resuming from step {steps} of {args.resume} with {resume_args}')
 
-    obs_codec = encoding.make_codec('symlog')
-    reward_codec = encoding.make_codec('symlog')
-    loader = BatchLoader(pad_observation=pad_state, pad_action=pad_action, obs_codec=obs_codec,
-                         reward_codec=reward_codec, device=args.device)
+    loader = BatchLoader(pad_observation=pad_state, pad_action=pad_action, device=args.device)
 
-    for _ in range(args.max_steps):
+    for step in range(args.max_steps):
 
-        training_time.go()
-
-        # sample batch from replay buffer
         buff += [next(gen)]
+        train_world_model(buff, rssm, rssm_opt, rssm_criterion, step)
+        train_actor_critic(buff, rssm, critic, critic_opt, ema_critic, actor, actor_opt, actor_criterion, step)
 
-        obs, act, reward_enc, cont, mask = loader.sample(buff, args.batch_length, args.batch_size)
-
-        h0 = rssm.new_hidden0(args.batch_size)
-        obs_dist, rewards_pred_dist, cont_dist, z_prior, z_post = rssm(obs, act, h0)
-        rssm_loss = criterion(obs, reward_enc, cont, mask, obs_dist, rewards_pred_dist, cont_dist, z_prior, z_post)
-
-        rssm_opt.zero_grad()
-        rssm_loss.backward()
-        rssm_opt.step()
-
-        training_time.pause()
-
-        with torch.no_grad():
-            wandb.log(criterion.loss_dict(), step=steps)
-            if steps % args.log_every_n_steps == 0:
-                logging_time.go()
-                reward_symlog_dec = reward_codec.decode(reward_enc)
-                reward_preds_dec = reward_codec.decode(rewards_pred_dist.mean).unsqueeze(-1)
-                log(obs, act, reward_symlog_dec, cont, mask, obs_dist, reward_preds_dec, cont_dist, z_prior, z_post,
-                    steps)
-                logging_time.pause()
-
-        training_time.go()
-
-        with torch.no_grad():
-            obs, act, reward, cont, mask = loader.sample(buff, batch_length=1, batch_size=args.batch_size)
-            h0 = rssm.new_hidden0(args.batch_size)
-            h, z, a, rewards_enc, cont = \
-                rssm.imagine(h0, obs[0], reward[0], cont[0], actor, imagination_horizon=args.imagination_horizon)
-
-            values_ema_dist = ema_critic(h, z)
-            value_ema_dec = reward_codec.decode(values_ema_dist.mean.unsqueeze(-1))
-            rewards_dec = reward_codec.decode(rewards_enc)
-            value_targets_dec = td_lambda(rewards_dec, cont, value_ema_dec)
-            value_targets_enc = reward_codec.encode(value_targets_dec)
-
-        value_preds_dist = critic(h, z)
-        critic_loss = - value_preds_dist.log_prob(value_targets_enc).mean()
-
-        critic_opt.zero_grad()
-        critic_loss.backward()
-        critic_opt.step()
-        polyak_update(critic, ema_critic)
-
-        actor_logits = actor(h, z)
-        actor_loss = actor_criterion(actor_logits, a, value_targets_dec)
-
-        actor_opt.zero_grad()
-        actor_loss.backward()
-        actor_opt.step()
-
-        training_time.pause()
-
-        with torch.no_grad():
-
-            wandb.log(actor_criterion.loss_dict(), step=steps)
-            wandb.log({'critic_loss': critic_loss.item()}, step=steps)
-            # wandb.log({'critic_bias': critic.out_layer.bias.data[127],
-            #            'reward_bias': rssm.reward_pred.output.bias.data[127]}, step=steps)
-
-            if replay.is_trajectory_end(buff[-1]):
-                latest_trajectory = replay.get_tail_trajectory(buff)
-                trajectory_reward = replay.total_reward(latest_trajectory)
-                trajectory_viz = viz.visualize_trajectory(latest_trajectory, pad_action, action_table=action_table)
-                trajectory_viz = (trajectory_viz * 255).to(dtype=torch.uint8).numpy()
-                wandb.log({
-                    'trajectory_reward': trajectory_reward,
-                    'trajectory_length': len(latest_trajectory),
-                    'trajectory_viz': Video(trajectory_viz)
-                }, step=steps)
-
-                log_decoded_trajectory(latest_trajectory, steps)
-
-                print(f'trajectory end: reward {trajectory_reward} len: {len(latest_trajectory)}')
-
-            if steps % args.log_every_n_steps == 0:
-                logging_time.go()
-                utils.save(utils.run.rundir, rssm, rssm_opt, critic, critic_opt, actor, actor_opt, args, steps)
-
-                decoded_obs = obs_codec.decode(rssm.decoder(h, z).mean)
-                mask = mask.repeat(1 + args.imagination_horizon, 1, 1)
-                value_preds_dec = reward_codec.decode(value_preds_dist.mean.unsqueeze(-1))
-
-                wandb.log({
-                    'rewards_dec': wandb.Histogram(rewards_dec.cpu(), num_bins=256),
-                    'value_ema_dec': wandb.Histogram(value_ema_dec.cpu(), num_bins=256),
-                    'value_targets_dec': wandb.Histogram(value_targets_dec.cpu(), num_bins=256),
-                    'value_preds_dec': wandb.Histogram(value_preds_dec.cpu(), num_bins=256),
-                    # 'value_preds_actor': wandb.Histogram(value_preds_for_actor_dec[1:].cpu(), num_bins=256),
-                }, step=steps)
-
-                imagined_trajectory_viz = viz.visualize_imagined_trajectory(
-                    decoded_obs[:, :], a[:, :], rewards_dec[:, :], cont[:, :], mask[:, :],
-                    value_targets_dec[:, :], action_table=action_table)
-                imagined_trajectory_viz = (imagined_trajectory_viz * 255).to(dtype=torch.uint8).cpu().numpy()
-                wandb.log({'imagined_trajectory': wandb.Video(imagined_trajectory_viz)}, step=steps)
-                logging_time.pause()
-                print(
-                    f'logged step {steps} training_time {training_time.total_time} logging_time {logging_time.total_time}')
-                training_time.reset()
-                logging_time.reset()
-
-        steps += 1
+        if step % args.log_every_n_steps == 0:
+            utils.save(utils.run.rundir, rssm, rssm_opt, critic, critic_opt, actor, actor_opt, args, step)
+            print(f'saved model at step {step}')

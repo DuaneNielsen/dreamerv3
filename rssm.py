@@ -26,10 +26,9 @@
 
 import torch
 import torch.nn as nn
-from torch.distributions import OneHotCategorical, Normal, Bernoulli
-from dists import OneHotCategoricalStraightThru, categorical_kl_divergence_clamped, TwoHot
+from torch.distributions import Normal, Bernoulli, OneHotCategorical
+from dists import OneHotCategoricalStraightThru, categorical_kl_divergence_clamped, TwoHotSymlog
 from blocks import MLPBlock, ModernDecoderConvBlock, Embedder, DecoderConvBlock
-from torch.nn.functional import cross_entropy
 
 
 class Encoder(nn.Module):
@@ -113,7 +112,7 @@ class RewardPredictor(nn.Module):
         )
 
     def forward(self, h):
-        return TwoHot(self.reward_predictor(h), low=-20., high=20.)
+        return TwoHotSymlog(self.reward_predictor(h))
 
 
 class ContinuePredictor(nn.Module):
@@ -322,9 +321,9 @@ class RSSMLoss:
         self.loss_rep = None
         self.loss = None
 
-    def __call__(self, obs, reward_encoded, cont, mask, obs_dist, reward_dist, cont_dist, z_prior_logits, z_post_logits):
+    def __call__(self, obs, rewards, cont, mask, obs_dist, reward_dist, cont_dist, z_prior_logits, z_post_logits):
         self.loss_obs = - obs_dist.log_prob(obs).flatten(start_dim=2) * mask
-        self.loss_reward = - reward_dist.log_prob(reward_encoded.squeeze(-1)) * mask.squeeze(-1)
+        self.loss_reward = - reward_dist.log_prob(rewards.squeeze(-1)) * mask.squeeze(-1)
         self.loss_cont = - cont_dist.log_prob(cont) * mask
         self.loss_dyn = 0.5 * categorical_kl_divergence_clamped(z_prior_logits.detach(), z_post_logits) * mask
         self.loss_rep = 0.1 * categorical_kl_divergence_clamped(z_prior_logits, z_post_logits.detach()) * mask

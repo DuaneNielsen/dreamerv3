@@ -4,7 +4,7 @@ from torch.nn.functional import one_hot
 from copy import deepcopy
 from blocks import MLPBlock, Embedder
 from torch.distributions import OneHotCategorical
-from dists import OneHotCategoricalStraightThru, TwoHot
+from dists import OneHotCategoricalStraightThru, TwoHotSymlog
 
 
 class Critic(nn.Module):
@@ -13,8 +13,6 @@ class Critic(nn.Module):
 
         self.out_layer = nn.Linear(mlp_size, 256, bias=False)
         self.out_layer.weight.data.zero_()
-        # self.out_layer.bias.data.zero_()
-        # self.out_layer.bias.data[127] = 1e-6
         self.critic = torch.nn.Sequential(
             nn.Linear(h_size + z_size * z_classes, mlp_size, bias=False),
             *[MLPBlock(mlp_size, mlp_size) for _ in range(mlp_layers)],
@@ -23,7 +21,7 @@ class Critic(nn.Module):
 
     def forward(self, h, z):
         h_z_flat = torch.cat((h, z.flatten(-2)), dim=-1)
-        return TwoHot(self.critic(h_z_flat), low=-20., high=20.)
+        return TwoHotSymlog(self.critic(h_z_flat))
 
 
 def monte_carlo(rewards, discount=0.997):
