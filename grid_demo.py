@@ -23,7 +23,6 @@ import envs.gridworld as gridworld
 import numpy as np
 
 
-
 def log_decoded_trajectory(latest_trajectory, steps):
     decoded_trajectory = []
     h = rssm.new_hidden0(batch_size=1)
@@ -120,7 +119,7 @@ def train_actor_critic(buff, rssm, critic, critic_opt, ema_critic, actor, actor_
         value_ema = values_ema_dist.mean.unsqueeze(-1)
         value_targets = td_lambda(rewards, cont, value_ema)
 
-    value_preds_dist = critic(h, z)
+    value_preds_dist = critic(h.detach(), z.detach())
     critic_loss = - value_preds_dist.log_prob(value_targets).mean()
 
     critic_opt.zero_grad()
@@ -128,7 +127,7 @@ def train_actor_critic(buff, rssm, critic, critic_opt, ema_critic, actor, actor_
     critic_opt.step()
     polyak_update(critic, ema_critic)
 
-    actor_logits = actor(h, z)
+    actor_logits = actor(h.detach(), z.detach())
     actor_loss = actor_criterion(actor_logits, a, value_targets)
 
     actor_opt.zero_grad()
@@ -214,7 +213,7 @@ if __name__ == '__main__':
     """
     action_table = {0: 'left', 1: 'right', 2: 'forward'}
 
-    env = gridworld.make('dont_look_back')
+    env = gridworld.make('grab_n_go')
     env = gridworld.MaxStepsWrapper(env, max_steps=100)
     env = gridworld.RGBImageWrapper(env)
     env = gridworld.TensorObsWrapper(env)

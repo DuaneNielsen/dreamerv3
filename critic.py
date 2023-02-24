@@ -41,22 +41,22 @@ def td(rewards, cont, values, discount=0.997):
     return target_values.detach()
 
 
-def td_lambda(rewards, cont, values, discount=0.997, lam=0.95):
+def td_lambda(rewards, cont, values_pred, discount=0.997, lam=0.95):
     """
     target values for the value function
     use an ema critic to calculate targets, don't use the training critic!
     :param rewards: [..., 1] rewards
     :param cont: [..., 1]
-    :param values: [..., 1]
+    :param values_pred: [..., 1]
     :param discount: discount factor default 0.997
     :param lam: lambda factor as in td lambda algorithm, default 0.95
     :return: target values for value function
     """
-    target_values = torch.zeros_like(values)
-    target_values[-1] = values[-1]
-    for t in reversed(range(values.size(0)-1)):
-        lam_da = (1 - lam) * values[t + 1] + lam * target_values[t + 1]
-        target_values[t] = cont[t] * discount * lam_da + rewards[t]
+    target_values = torch.zeros_like(values_pred)
+    target_values[-1] = values_pred[-1]
+    for t in reversed(range(values_pred.size(0) - 1)):
+        lam_da = (1 - lam) * values_pred[t + 1] + lam * target_values[t + 1]
+        target_values[t] = cont[t] * discount * lam_da + rewards[t + 1]
     return target_values.detach()
 
 
@@ -136,22 +136,22 @@ class ActorLoss:
         # critic values are shifted right, last action in trajectory is discarded
         # if the last action is the terminal, its going to be tha pad action anyway
         with torch.no_grad():
-            self.value_preds_min = critic_values[1:].min()
-            self.value_preds_max = critic_values[1:].max()
-            self.value_preds_95th_percentile = torch.quantile(critic_values[1:], 0.95, interpolation='lower')
-            self.value_preds_5th_percentile = torch.quantile(critic_values[1:], 0.05, interpolation='higher')
+            self.value_preds_min = critic_values.min()
+            self.value_preds_max = critic_values.max()
+            self.value_preds_95th_percentile = torch.quantile(critic_values, 0.95, interpolation='lower')
+            self.value_preds_5th_percentile = torch.quantile(critic_values, 0.05, interpolation='higher')
             return_scale_step = self.value_preds_95th_percentile - self.value_preds_5th_percentile
             if self.return_scale_running is None:
                 self.return_scale_running = return_scale_step
             self.return_scale_running = self.return_scale_running * self.return_normalization_decay + return_scale_step * (1. - self.return_normalization_decay)
             self.applied_scale = max(self.return_scale_running.item(), 1.)
 
-        actor_dist = OneHotCategoricalStraightThru(logits=actor_logits[:-1])
-        self.reinforce_loss = - critic_values[1:].detach() * actor_dist.log_prob(actions[:-1]) / self.applied_scale
+        actor_dist = OneHotCategoricalStraightThru(logits=actor_logits)
+        self.reinforce_loss = - critic_values.detach() * actor_dist.log_prob(actions) / self.applied_scale
         self.entropy_loss = - 3e-4 * actor_dist.entropy()
         if mask is not None:
-            self.reinforce_loss = self.reinforce_loss * mask[:-1]
-            self.entropy_loss = self.entropy_loss * mask[:-1]
+            self.reinforce_loss = self.reinforce_loss * mask
+            self.entropy_loss = self.entropy_loss * mask
         self.reinforce_loss = self.reinforce_loss.mean()
         self.entropy_loss = self.entropy_loss.mean()
         self.actor_loss = self.reinforce_loss + self.entropy_loss
@@ -227,7 +227,7 @@ if __name__ == '__main__':
 
             obs, reward, terminated, truncated, info = env.step(action_env)
             obs_prepro = prepro(obs)
-            cont = 0. if terminated or truncated else 1.
+            cont = 0. if terminated else 1.
 
             if terminated or truncated:
 

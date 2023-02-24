@@ -47,8 +47,10 @@ empty_tile = {'e'}.union(start_location)
 goal_tile = {'g'}
 lava_tile = {'l'}
 wall_tile = {'w'}
+healthpack_tile = {'r'}
+transient_tile = healthpack_tile
 terminal_tile = goal_tile.union(lava_tile)
-reward_tile = {'g': 1.0, 'l': -1.0}
+reward_tile = {'g': 1.0, 'l': -1.0, 'r': 1.0}
 blocking_tile = wall_tile
 
 
@@ -74,7 +76,7 @@ class Renderer:
         for x in range(len(grid[0])):
             tiles += [[]]
             for y in range(len(grid)):
-                if grid[y][x] in goal_tile:
+                if grid[y][x] in goal_tile or grid[y][x] in healthpack_tile:
                     tiles[x] += [self.goal_tile]
                 if grid[y][x] in empty_tile:
                     tiles[x] += [self.empty_tile]
@@ -170,9 +172,11 @@ class SimpleGridWorld:
             g -> goal tile
             l -> lava tile
             w -> wall tile
+            r -> rewardpack
         """
 
         self.grid = grid
+        self.grid_start_state = copy(self.grid)
 
         for y, row in enumerate(grid):
             for x, tile in enumerate(row):
@@ -203,6 +207,7 @@ class SimpleGridWorld:
 
     def reset(self, seed=None, **kwargs):
         self.pos = copy(self.start_pos)
+        self.grid = copy(self.grid_start_state)
         self.direction = self.start_direction
         self.draw()
         return State(self.pos, self.direction, self.grid)
@@ -229,6 +234,10 @@ class SimpleGridWorld:
                     self.pos += self.DIRECTION[self.direction]
                 reward = reward_tile[tile] if tile in reward_tile else 0.
                 terminated = tile in terminal_tile
+                if tile in transient_tile:
+                    x = list(self.grid[lookahead.y])
+                    x[lookahead.x] = 'e'
+                    self.grid[lookahead.y] = ''.join(x)
 
         self.draw()
 
@@ -261,6 +270,13 @@ env_configs = {
         'lll',
         'Reg',
         'lll'
+    ],
+    'grab_em_all': [
+      'Rrrrg',
+    ],
+    'grab_n_go': [
+        'were',
+        'lRwg'
     ]
 }
 
@@ -277,7 +293,7 @@ if __name__ == '__main__':
     plt.ion()
     fig, ax = plt.subplots()
 
-    env = make('corridor', render_mode='human')
+    env = make('grab_n_go', render_mode='human')
     env = MaxStepsWrapper(env, 100)
     env = RGBImageWrapper(env)
     env = TensorObsWrapper(env)
