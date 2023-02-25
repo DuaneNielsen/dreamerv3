@@ -9,6 +9,10 @@ def test_lambda():
     reward = torch.tensor([0., 0., 0., 1.0])
     cont = torch.tensor([1., 1., 1., 0.0])
 
-    targets = td_lambda(reward, cont, values)
-    print('')
-    print(targets)
+    discount = 0.9
+    lam = 0.8
+    targets = td_lambda(reward, cont, values, discount=discount, lam=lam)
+    target_1 = lam * discount ** 1
+    target_2 = (target_1 * lam) * discount
+    expected = torch.tensor([target_2, target_1, 1.0, 0.0])
+    assert torch.allclose(targets, expected)
