@@ -6,6 +6,7 @@ import importlib.resources
 from copy import copy
 from gymnasium import ObservationWrapper, ActionWrapper
 from torchvision.transforms.functional import to_tensor, resize
+import numpy as np
 
 
 class Vector2:
@@ -141,6 +142,18 @@ class TensorObsWrapper(ObservationWrapper):
     def observation(self, observation: ObsType) -> WrapperObsType:
         observation = resize(observation, [self.height, self.width])
         return to_tensor(observation)
+
+
+class NumpyObsWrapper(ObservationWrapper):
+
+    def __init__(self, env, width=64, height=64):
+        super().__init__(env)
+        self.width = width
+        self.height = height
+
+    def observation(self, observation: ObsType) -> WrapperObsType:
+        observation = resize(observation, [self.height, self.width])
+        return np.array(observation)
 
 
 class OneHotTensorActionWrapper(ActionWrapper):
