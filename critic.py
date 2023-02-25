@@ -4,7 +4,7 @@ from torch.nn.functional import one_hot
 from copy import deepcopy
 from blocks import MLPBlock, Embedder
 from torch.distributions import OneHotCategorical
-from dists import OneHotCategoricalStraightThru, TwoHotSymlog
+from dists import OneHotCategoricalStraightThru, TwoHotSymlog, OneHotCategoricalUnimix
 
 
 class Critic(nn.Module):
@@ -146,7 +146,7 @@ class ActorLoss:
             self.return_scale_running = self.return_scale_running * self.return_normalization_decay + return_scale_step * (1. - self.return_normalization_decay)
             self.applied_scale = max(self.return_scale_running.item(), 1.)
 
-        actor_dist = OneHotCategoricalStraightThru(logits=actor_logits)
+        actor_dist = OneHotCategoricalUnimix(logits=actor_logits)
         self.reinforce_loss = - critic_values.detach() * actor_dist.log_prob(actions) / self.applied_scale
         self.entropy_loss = - 3e-4 * actor_dist.entropy()
         if mask is not None:
