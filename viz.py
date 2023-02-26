@@ -102,15 +102,15 @@ def make_caption(caption, color=(255, 255, 255, 255), width=64, height=16):
     img = Image.new('RGB', (width, height))
     draw = ImageDraw.Draw(img)
     draw.text((1, 5), caption, fill=color)
-    return to_tensor(img)
+    return np.array(img)
 
 
 def add_caption_to_observation(caption_above_list, obs, caption_below_list):
     top_captions = [make_caption(*caption) for caption in caption_above_list]
     bottom_captions = [make_caption(*caption) for caption in caption_below_list]
-    top_captions = torch.cat(top_captions, dim=1).to(obs.device)
-    bottom_captions = torch.cat(bottom_captions, dim=1).to(obs.device)
-    return torch.cat([top_captions, obs, bottom_captions], dim=1)
+    top_captions = np.concatenate(top_captions, 0)
+    bottom_captions = np.concatenate(bottom_captions, 0)
+    return np.concatenate([top_captions, obs, bottom_captions], 0)
 
 
 class CaptionedObsFactory:
@@ -123,6 +123,19 @@ class CaptionedObsFactory:
         self.action_table = action_table
 
     def __call__(self, obs, action, reward, cont, value=None):
+
+        if isinstance(obs, torch.Tensor):
+            obs = obs.detach().permute(1, 2, 0).cpu().numpy() * 255
+            obs = obs.astype(np.uint8)
+        if isinstance(action, torch.Tensor):
+            action = action.detach().cpu().numpy()
+        if isinstance(reward, torch.Tensor):
+            reward = reward.detach().cpu().numpy()
+        if isinstance(cont, torch.Tensor):
+            cont = cont.detach().cpu().numpy()
+        if isinstance(value, torch.Tensor):
+            value = value.detach().cpu().numpy()
+
         if self.action_table is not None:
             action_caption = f'{self.action_table[action.argmax().item()]}'
         else:
@@ -148,33 +161,34 @@ class CaptionedObsFactory:
             value_color = (255, 255, 255, 255)
             caption_below_list += [(value_caption, value_color)]
 
-        return add_caption_to_observation(
+        captioned_obs = add_caption_to_observation(
             caption_above_list=[(action_caption, )],
             obs=obs,
             caption_below_list=caption_below_list
         )
+        return torch.from_numpy(captioned_obs).permute(2, 0, 1) / 255.
 
 
-def visualize_trajectory(trajectory, pad_action, action_table=None):
-    obs, action, reward, cont = stack_trajectory(trajectory, pad_action=pad_action)
+def visualize_trajectory(trajectory, action_table=None):
+    obs, action, reward, cont = stack_trajectory(trajectory)
     vizualize_step = CaptionedObsFactory(action_table=action_table)
     panel = [vizualize_step(*step) for step in zip(obs, action, reward, cont)]
     return torch.stack(panel)
 
 
-def visualize_imagined_trajectory(obs_dec, action, rewards_dec, cont, mask, value_preds, action_table):
+def visualize_imagined_trajectory(obs_dec, action, rewards_dec, cont, value_preds, action_table):
     frames = []
     for t in range(obs_dec.size(0)):
-        frames += [make_panel(obs_dec[t], action[t], rewards_dec[t], cont[t], mask[t], value=value_preds[t], action_table=action_table)]
+        frames += [make_panel(obs_dec[t], action[t], rewards_dec[t], cont[t], value=value_preds[t], action_table=action_table)]
     return torch.stack(frames)
 
 
-def make_trajectory_panel(trajectory, pad_action, action_table=None):
-    panel = visualize_trajectory(trajectory, pad_action, action_table)
+def make_trajectory_panel(trajectory, action_table=None):
+    panel = visualize_trajectory(trajectory, action_table)
     return make_grid(panel)
 
 
-def make_panel(obs, action, reward, cont, mask, value=None, filter_mask=None, action_table=None, nrow=8):
+def make_panel(obs, action, reward, cont, value=None, filter_mask=None, action_table=None, nrow=8):
     """
     obs: observations [..., C, H, W]
     action: discrete action [..., AD, AC]
@@ -185,14 +199,14 @@ def make_panel(obs, action, reward, cont, mask, value=None, filter_mask=None, ac
     """
 
     if filter_mask is None:
-        filter_mask = torch.full_like(mask.squeeze(), True, dtype=torch.bool, device=obs.device)
+        filter_mask = torch.full_like(reward.squeeze(), True, dtype=torch.bool, device=obs.device)
 
-    obs_sample = obs[filter_mask] * mask[filter_mask][..., None, None]
-    action_sample = action[filter_mask] * mask[filter_mask][..., None]
-    reward_sample = reward[filter_mask] * mask[filter_mask]
-    cont_sample = cont[filter_mask] * mask[filter_mask]
+    obs_sample = obs[filter_mask]
+    action_sample = action[filter_mask]
+    reward_sample = reward[filter_mask]
+    cont_sample = cont[filter_mask]
     if value is not None:
-        value_sample = value[filter_mask] * mask[filter_mask]
+        value_sample = value[filter_mask]
     else:
         value_sample = [None] * cont_sample.shape[0]
 
@@ -206,26 +220,26 @@ def make_panel(obs, action, reward, cont, mask, value=None, filter_mask=None, ac
     return make_grid(torch.stack(panel), nrow)
 
 
-def make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask, filter_mask=None,
+def make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, filter_mask=None,
                        action_table=None):
-    gt_panel = make_panel(obs, action, reward, cont, mask, filter_mask=filter_mask, action_table=action_table)
-    pred_panel = make_panel(obs_pred, action, reward_pred, cont_pred, mask, filter_mask=filter_mask,
+    gt_panel = make_panel(obs, action, reward, cont, filter_mask=filter_mask, action_table=action_table)
+    pred_panel = make_panel(obs_pred, action, reward_pred, cont_pred, filter_mask=filter_mask,
                             action_table=action_table)
     return torch.cat((gt_panel, pred_panel), dim=-1)
 
 
-def make_batch_panels(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask, action_table=None):
-    batch_filter_mask = torch.full_like(mask[:, :, 0], False, dtype=torch.bool)
+def make_batch_panels(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, action_table=None):
+    batch_filter_mask = torch.full_like(reward[:, :, 0], False, dtype=torch.bool)
     batch_filter_mask[0:8, 0:8] = True
-    batch_panel = make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask,
+    batch_panel = make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred,
                                      batch_filter_mask, action_table=action_table)
 
-    rewards_filter = (reward.abs().squeeze() > 0.1) & mask.squeeze()
-    rewards_panel = make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask,
+    rewards_filter = (reward.abs().squeeze() > 0.1)
+    rewards_panel = make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred,
                                        rewards_filter, action_table=action_table)
 
-    terminal_filter = (cont.squeeze() == 0.0) & mask.squeeze()
-    terminal_panel = make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, mask,
+    terminal_filter = (cont.squeeze() == 0.0)
+    terminal_panel = make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred,
                                         terminal_filter, action_table=action_table)
 
     return batch_panel, rewards_panel, terminal_panel

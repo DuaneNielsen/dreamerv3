@@ -115,3 +115,9 @@ if __name__ == '__main__':
     save(run.rundir, rssm, opt, args, 100, 1.32)
     rssm, opt, step, args, loss = load(run.rundir, rssm, opt)
     print(args)
+
+
+def register_gradient_clamp(nn_module, gradient_min_max):
+    for p in nn_module.parameters():
+        p.register_hook(
+            lambda grad: torch.clamp(grad, -gradient_min_max, gradient_min_max))

@@ -113,7 +113,7 @@ class ActorLoss:
         self.value_preds_95th_percentile = None
         self.value_preds_max = None
 
-    def __call__(self, actor_logits, actions, critic_values, mask=None):
+    def __call__(self, actor_logits, actions, value_targets, critic_values):
         """
         Policy gradient loss for actor, value based Reinforce + a fixed entropy bonus
         :param actor_logits: (L, N, action_size, action_classes) - raw scores from the policy drawn from
@@ -136,22 +136,19 @@ class ActorLoss:
         # critic values are shifted right, last action in trajectory is discarded
         # if the last action is the terminal, its going to be tha pad action anyway
         with torch.no_grad():
-            self.value_preds_min = critic_values.min()
-            self.value_preds_max = critic_values.max()
-            self.value_preds_95th_percentile = torch.quantile(critic_values, 0.95, interpolation='lower')
-            self.value_preds_5th_percentile = torch.quantile(critic_values, 0.05, interpolation='higher')
+            self.value_preds_min = value_targets[:-1].min()
+            self.value_preds_max = value_targets[:-1].max()
+            self.value_preds_95th_percentile = torch.quantile(value_targets[:-1], 0.95, interpolation='lower')
+            self.value_preds_5th_percentile = torch.quantile(value_targets[:-1], 0.05, interpolation='higher')
             return_scale_step = self.value_preds_95th_percentile - self.value_preds_5th_percentile
             if self.return_scale_running is None:
                 self.return_scale_running = return_scale_step
             self.return_scale_running = self.return_scale_running * self.return_normalization_decay + return_scale_step * (1. - self.return_normalization_decay)
             self.applied_scale = max(self.return_scale_running.item(), 1.)
 
-        actor_dist = OneHotCategoricalUnimix(logits=actor_logits)
-        self.reinforce_loss = - critic_values.detach() * actor_dist.log_prob(actions) / self.applied_scale
+        actor_dist = OneHotCategoricalUnimix(logits=actor_logits[:-1])
+        self.reinforce_loss = - (value_targets[:-1].detach() - critic_values[-1].detach()) * actor_dist.log_prob(actions[:-1]) / self.applied_scale
         self.entropy_loss = - 3e-4 * actor_dist.entropy()
-        if mask is not None:
-            self.reinforce_loss = self.reinforce_loss * mask
-            self.entropy_loss = self.entropy_loss * mask
         self.reinforce_loss = self.reinforce_loss.mean()
         self.entropy_loss = self.entropy_loss.mean()
         self.actor_loss = self.reinforce_loss + self.entropy_loss

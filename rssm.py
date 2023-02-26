@@ -321,12 +321,12 @@ class RSSMLoss:
         self.loss_rep = None
         self.loss = None
 
-    def __call__(self, obs, rewards, cont, mask, obs_dist, reward_dist, cont_dist, z_prior_logits, z_post_logits):
-        self.loss_obs = - obs_dist.log_prob(obs).flatten(start_dim=2) * mask
-        self.loss_reward = - reward_dist.log_prob(rewards.squeeze(-1)) * mask.squeeze(-1)
-        self.loss_cont = - cont_dist.log_prob(cont) * mask
-        self.loss_dyn = 0.5 * categorical_kl_divergence_clamped(z_prior_logits.detach(), z_post_logits) * mask
-        self.loss_rep = 0.1 * categorical_kl_divergence_clamped(z_prior_logits, z_post_logits.detach()) * mask
+    def __call__(self, obs, rewards, cont, obs_dist, reward_dist, cont_dist, z_prior_logits, z_post_logits):
+        self.loss_obs = - obs_dist.log_prob(obs).flatten(start_dim=2)
+        self.loss_reward = - reward_dist.log_prob(rewards.squeeze(-1))
+        self.loss_cont = - cont_dist.log_prob(cont)
+        self.loss_dyn = 0.5 * categorical_kl_divergence_clamped(z_prior_logits.detach(), z_post_logits)
+        self.loss_rep = 0.1 * categorical_kl_divergence_clamped(z_prior_logits, z_post_logits.detach())
         self.loss_obs = self.loss_obs.mean()
         self.loss_reward = self.loss_reward.mean()
         self.loss_cont = self.loss_cont.mean()

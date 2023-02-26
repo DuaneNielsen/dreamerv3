@@ -1,13 +1,7 @@
-import gymnasium as gym
-import matplotlib.pyplot as plt
-from gymnasium import RewardWrapper
-from minigrid.wrappers import RGBImgObsWrapper
-
 import replay
 from replay import BatchLoader, Step
 from collections import deque
-from torch.nn.functional import one_hot, mse_loss, cross_entropy
-from torchvision.transforms.functional import resize
+from torchvision.transforms.functional import to_tensor
 from rssm import make_small, RSSMLoss
 from critic import Critic, td_lambda, polyak_update, Actor, ActorLoss
 import torch
@@ -16,6 +10,8 @@ from argparse import ArgumentParser
 import copy
 import utils
 import wandb
+
+from utils import register_gradient_clamp
 from viz import make_batch_panels
 from wandb.data_types import Video
 import viz
@@ -26,61 +22,53 @@ import numpy as np
 def log_decoded_trajectory(latest_trajectory, steps):
     decoded_trajectory = []
     h = rssm.new_hidden0(batch_size=1)
-    z = rssm.encode_observation(h, latest_trajectory[0].obs.unsqueeze(0).to(args.device)).mode
+    obs = torch.from_numpy(latest_trajectory[0].observation).permute(2, 0, 1).unsqueeze(0).to(args.device) / 255.
+    z = rssm.encode_observation(h, obs).mode
     for step in latest_trajectory:
         decoded_trajectory += [rssm.decoder(h, z).mean]
-        if step.act is None:
+        if step.is_terminal:
             break
-        h, z = rssm.step_reality(h, step.obs.unsqueeze(0).to(args.device), step.act.unsqueeze(0).to(args.device))
+        obs = torch.from_numpy(latest_trajectory[0].observation).permute(2, 0, 1).unsqueeze(0).to(args.device) / 255.
+        action = torch.from_numpy(step.action).unsqueeze(0).to(args.device)
+        h, z = rssm.step_reality(h, obs, action)
 
     decoded_trajectory = torch.stack(decoded_trajectory, dim=1)
     decoded_trajectory = (decoded_trajectory * 255).to(dtype=torch.uint8, device='cpu').numpy()
     wandb.log({'decoded_trajectory': wandb.Video(decoded_trajectory)}, step=steps)
 
 
-def rollout(env, actor, rssm):
-    rssm.eval()
-    actor.eval()
+def rollout(env, actor, rssm, pad_action):
+
     obs, info = env.reset()
     h = rssm.new_hidden0(batch_size=1)
-    obs = obs.to(rssm.device).unsqueeze(0)
-    z = rssm.encode_observation(h, obs).mode
-    reward, terminated, truncated, cont = 0.0, False, False, 1.
+    obs_tensor = to_tensor(obs).to(rssm.device).unsqueeze(0)
+    z = rssm.encode_observation(h, obs_tensor).mode
+    reward, terminated, truncated = 0.0, False, False
 
     while True:
         action = actor.sample_action(h, z)
-        rssm.train()
-        rssm.train()
-        yield Step(obs[0].cpu(), action[0].cpu(), reward, cont)
-        rssm.eval()
-        actor.eval()
+        yield Step(obs, action[0].detach().cpu().numpy(), reward, terminated, truncated)
 
         obs, reward, terminated, truncated, info = env.step(action[0].cpu())
-        obs = obs.to(rssm.device).unsqueeze(0)
-        h, z = rssm.step_reality(h, obs, action)
-
-        cont = 0. if terminated else 1.
+        obs_tensor = to_tensor(obs).to(rssm.device).unsqueeze(0)
+        h, z = rssm.step_reality(h, obs_tensor, action)
 
         if terminated or truncated:
-            rssm.train()
-            actor.train()
-            yield Step(obs[0].cpu(), None, reward, cont)
-            rssm.eval()
-            actor.eval()
+            yield Step(obs, pad_action, reward, terminated, truncated)
 
             obs, info = env.reset()
-            obs = obs.to(rssm.device).unsqueeze(0)
+            obs_tensor = to_tensor(obs).to(rssm.device).unsqueeze(0)
             h = rssm.new_hidden0(batch_size=1)
-            z = rssm.encode_observation(h, obs).mode
-            reward, terminated, truncated, cont = 0.0, False, False, 1.
+            z = rssm.encode_observation(h, obs_tensor).mode
+            reward, terminated, truncated = 0.0, False, False
 
 
 def train_world_model(buff, rssm, rssm_opt, rssm_criterion, step=None):
-    obs, action, reward, cont, mask = loader.sample(buff, args.batch_length, args.batch_size)
+    obs, action, reward, cont = loader.sample(buff, args.batch_length, args.batch_size)
 
     h0 = rssm.new_hidden0(args.batch_size)
     obs_dist, reward_dist, cont_dist, z_prior, z_post = rssm(obs, action, h0)
-    rssm_loss = rssm_criterion(obs, reward, cont, mask, obs_dist, reward_dist, cont_dist, z_prior, z_post)
+    rssm_loss = rssm_criterion(obs, reward, cont, obs_dist, reward_dist, cont_dist, z_prior, z_post)
 
     rssm_opt.zero_grad()
     rssm_loss.backward()
@@ -92,17 +80,17 @@ def train_world_model(buff, rssm, rssm_opt, rssm_criterion, step=None):
             with torch.no_grad():
                 batch_panel, rewards_panel, terminal_panel = \
                     make_batch_panels(obs, action, reward, cont, obs_dist.mean,
-                                      reward_dist.mean.unsqueeze(-1), cont_dist.probs, mask,
+                                      reward_dist.mean.unsqueeze(-1), cont_dist.probs,
                                       action_table=action_table)
 
                 wandb.log({
                     'batch_panel': wandb.Image(batch_panel),
                     'nonzero_rewards_panel': wandb.Image(rewards_panel),
                     'terminal_state_panel': wandb.Image(terminal_panel),
-                    'reward_gt': wandb.Histogram(reward[mask].flatten().cpu(), num_bins=256),
-                    'reward_pred': wandb.Histogram(reward_dist.mean.unsqueeze(-1)[mask].flatten().cpu(), num_bins=256),
-                    'cont_gt': wandb.Histogram(cont[mask].flatten().cpu(), num_bins=5),
-                    'cont_probs': wandb.Histogram(cont_dist.probs[mask].flatten().cpu(), num_bins=5),
+                    'reward_gt': wandb.Histogram(reward.flatten().cpu(), num_bins=256),
+                    'reward_pred': wandb.Histogram(reward_dist.mean.unsqueeze(-1).flatten().cpu(), num_bins=256),
+                    'cont_gt': wandb.Histogram(cont.flatten().cpu(), num_bins=5),
+                    'cont_probs': wandb.Histogram(cont_dist.probs.flatten().cpu(), num_bins=5),
                     'z_prior': wandb.Histogram(z_prior.argmax(-1).flatten().cpu().numpy(), num_bins=32),
                     'z_post': wandb.Histogram(z_post.argmax(-1).flatten().cpu().numpy()),
                 }, step=step)
@@ -110,7 +98,7 @@ def train_world_model(buff, rssm, rssm_opt, rssm_criterion, step=None):
 
 def train_actor_critic(buff, rssm, critic, critic_opt, ema_critic, actor, actor_opt, actor_criterion, step=None):
     with torch.no_grad():
-        obs, act, reward, cont, mask = loader.sample(buff, batch_length=1, batch_size=args.batch_size)
+        obs, act, reward, cont = loader.sample(buff, batch_length=1, batch_size=args.batch_size)
         h0 = rssm.new_hidden0(args.batch_size)
         h, z, a, rewards, cont = \
             rssm.imagine(h0, obs[0], reward[0], cont[0], actor, imagination_horizon=args.imagination_horizon)
@@ -128,7 +116,7 @@ def train_actor_critic(buff, rssm, critic, critic_opt, ema_critic, actor, actor_
     polyak_update(critic, ema_critic)
 
     actor_logits = actor(h.detach(), z.detach())
-    actor_loss = actor_criterion(actor_logits, a, value_targets)
+    actor_loss = actor_criterion(actor_logits, a, value_targets, value_preds_dist.mean)
 
     actor_opt.zero_grad()
     actor_loss.backward()
@@ -139,10 +127,10 @@ def train_actor_critic(buff, rssm, critic, critic_opt, ema_critic, actor, actor_
         wandb.log(actor_criterion.loss_dict(), step=step)
         wandb.log({'critic_loss': critic_loss.item()}, step=step)
 
-        if replay.is_trajectory_end(buff[-1]):
+        if buff[-1].is_terminal:
             latest_trajectory = replay.get_tail_trajectory(buff)
             trajectory_reward = replay.total_reward(latest_trajectory)
-            trajectory_viz = viz.visualize_trajectory(latest_trajectory, pad_action, action_table=action_table)
+            trajectory_viz = viz.visualize_trajectory(latest_trajectory, action_table=action_table)
             trajectory_viz = (trajectory_viz * 255).to(dtype=torch.uint8).numpy()
             wandb.log({
                 'trajectory_reward': trajectory_reward,
@@ -157,7 +145,6 @@ def train_actor_critic(buff, rssm, critic, critic_opt, ema_critic, actor, actor_
         if step % args.log_every_n_steps == 0:
 
             obs_imagined = rssm.decoder(h, z).mean
-            mask = mask.repeat(1 + args.imagination_horizon, 1, 1)
 
             wandb.log({
                 'rewards_dec': wandb.Histogram(rewards.cpu(), num_bins=256),
@@ -167,7 +154,7 @@ def train_actor_critic(buff, rssm, critic, critic_opt, ema_critic, actor, actor_
             }, step=step)
 
             imagined_trajectory_viz = viz.visualize_imagined_trajectory(
-                obs_imagined[:, :], a[:, :], rewards[:, :], cont[:, :], mask[:, :],
+                obs_imagined[:, :], a[:, :], rewards[:, :], cont[:, :],
                 value_targets[:, :], action_table=action_table)
             imagined_trajectory_viz = (imagined_trajectory_viz * 255).to(dtype=torch.uint8).cpu().numpy()
             wandb.log({'imagined_trajectory': wandb.Video(imagined_trajectory_viz)}, step=step)
@@ -216,22 +203,13 @@ if __name__ == '__main__':
     env = gridworld.make('grab_n_go')
     env = gridworld.MaxStepsWrapper(env, max_steps=100)
     env = gridworld.RGBImageWrapper(env)
-    env = gridworld.TensorObsWrapper(env)
+    env = gridworld.NumpyObsWrapper(env)
     env = gridworld.OneHotTensorActionWrapper(env)
 
-    pad_state = torch.zeros(3, 64, 64, dtype=torch.uint8)
-    pad_action = one_hot(torch.tensor([0]), args.env_action_classes)
+    pad_action = np.zeros((1, args.env_action_classes), dtype=np.float32)
 
     rssm = make_small(action_classes=args.env_action_classes).to(args.device)
     rssm_opt = Adam(rssm.parameters(), lr=args.world_model_learning_rate, eps=args.world_model_adam_epsilon)
-
-
-    def register_gradient_clamp(nn_module, gradient_min_max):
-        for p in nn_module.parameters():
-            p.register_hook(
-                lambda grad: torch.clamp(grad, -gradient_min_max, gradient_min_max))
-
-
     register_gradient_clamp(rssm, args.world_model_gradient_clipping)
     rssm_criterion = RSSMLoss()
 
@@ -246,8 +224,8 @@ if __name__ == '__main__':
     actor_criterion = ActorLoss()
 
     buff = deque(maxlen=args.replay_capacity)
-    gen = rollout(env, actor, rssm)
-    for i in range(20):
+    gen = rollout(env, actor, rssm, pad_action)
+    for i in range(400):
         buff += [next(gen)]
 
     if args.resume:
@@ -255,7 +233,7 @@ if __name__ == '__main__':
             utils.load(args.resume, rssm, rssm_opt, critic, critic_opt, actor, actor_opt)
         print(f'resuming from step {steps} of {args.resume} with {resume_args}')
 
-    loader = BatchLoader(pad_observation=pad_state, pad_action=pad_action, device=args.device)
+    loader = BatchLoader(device=args.device, observation_transform=replay.transform_rgb_image)
 
     for step in range(args.max_steps):
 
