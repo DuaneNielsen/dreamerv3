@@ -1,5 +1,7 @@
 from PIL import Image
+import gymnasium
 from gymnasium.core import ObsType, WrapperObsType, ActType, WrapperActType
+from gymnasium.spaces import Box, Discrete, MultiDiscrete
 from matplotlib import pyplot as plt
 from collections import namedtuple
 import importlib.resources
@@ -98,61 +100,17 @@ class Renderer:
         return image
 
 
-class RGBImageWrapper:
-    def __init__(self, env):
-        self.env = env
+class RGBImageWrapper(ObservationWrapper):
+    def __init__(self, env, height=64, width=64):
+        super().__init__(env)
         self.renderer = Renderer(env)
-
-    def reset(self, **kwargs):
-        obs = self.env.reset(**kwargs)
-        image = self.renderer.draw(obs.pos, obs.direction, obs.grid)
-        return image, {}
-
-    def step(self, action):
-        obs, reward, terminated, truncated, info = self.env.step(action)
-        image = self.renderer.draw(obs.pos, obs.direction, obs.grid)
-        return image, reward, terminated, truncated, info
-
-
-class MaxStepsWrapper:
-    def __init__(self, env, max_steps):
-        self.env = env
-        self.steps = 0
-        self.max_steps = max_steps
-
-    def reset(self, **kwargs):
-        self.steps = 0
-        return self.env.reset(**kwargs)
-
-    def step(self, action):
-        self.steps += 1
-        obs, reward, terminated, truncated, info = self.env.step(action)
-        if self.steps == self.max_steps:
-            truncated = True
-        return obs, reward, terminated, truncated, info
-
-
-class TensorObsWrapper(ObservationWrapper):
-
-    def __init__(self, env, width=64, height=64):
-        super().__init__(env)
-        self.width = width
         self.height = height
+        self.width = width
+        self.observation_space = Box(low=0, high=255, shape=(width, height, 3), dtype=np.uint8)
 
     def observation(self, observation: ObsType) -> WrapperObsType:
-        observation = resize(observation, [self.height, self.width])
-        return to_tensor(observation)
-
-
-class NumpyObsWrapper(ObservationWrapper):
-
-    def __init__(self, env, width=64, height=64):
-        super().__init__(env)
-        self.width = width
-        self.height = height
-
-    def observation(self, observation: ObsType) -> WrapperObsType:
-        observation = resize(observation, [self.height, self.width])
+        image = self.renderer.draw(observation.pos, observation.direction, observation.grid)
+        observation = resize(image, [self.height, self.width])
         return np.array(observation)
 
 
@@ -164,10 +122,11 @@ class OneHotTensorActionWrapper(ActionWrapper):
         return action.argmax(-1)
 
 
-class SimpleGridWorld:
+class SimpleGridWorld(gymnasium.Env):
     DIRECTION = [Vector2(0, -1), Vector2(1, 0), Vector2(0, 1), Vector2(-1, 0)]
 
     def __init__(self, grid, render_mode=None):
+        super().__init__()
         """
         creates a simple gridworld
 
@@ -188,6 +147,8 @@ class SimpleGridWorld:
             r -> rewardpack
         """
 
+        self.observation_space = MultiDiscrete(np.array((len(grid[0]), len(grid))))
+        self.action_space = Discrete(3)
         self.grid = grid
         self.grid_start_state = copy(self.grid)
 
@@ -223,7 +184,7 @@ class SimpleGridWorld:
         self.grid = copy(self.grid_start_state)
         self.direction = self.start_direction
         self.draw()
-        return State(self.pos, self.direction, self.grid)
+        return State(self.pos, self.direction, self.grid), {}
 
     def step(self, action):
         """
@@ -255,6 +216,9 @@ class SimpleGridWorld:
         self.draw()
 
         return State(self.pos, self.direction, self.grid), reward, terminated, truncated, {}
+
+    def get_action_meanings(self):
+        return ['left', 'right', 'forward']
 
 
 env_configs = {

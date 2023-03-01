@@ -23,7 +23,7 @@ class ButtonWorld(gymnasium.Env):
     def render_human(self):
         rgb_array = self.render()
         cv2.imshow('buttonworld', rgb_array)
-        cv2.waitKey(1)
+        cv2.waitKey(1000)
 
     def reset(self, seed=None, **options):
         self.grid = np.zeros(self.target.shape)
@@ -43,10 +43,31 @@ class ButtonWorld(gymnasium.Env):
         return cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
 
 
+class GameOfLife(ButtonWorld):
+    def __init__(self, target, render_mode='human'):
+        super().__init__(target, render_mode)
+        self.kernel = np.array([
+            [1., 1., 1.],
+            [1., 0., 1.],
+            [1., 1., 1.]
+        ])
+
+    def step(self, action: ActType) -> Tuple[ObsType, SupportsFloat, bool, bool, Dict[str, Any]]:
+        self.grid[action[0], action[1]] = np.logical_not(self.grid[action[0], action[1]])
+        scores = cv2.filter2D(src=self.grid, ddepth=-1, kernel=self.kernel)
+        self.grid = np.logical_or(scores >= 3.0, np.logical_and(scores == 2, self.grid == 1.0)) * 1.0
+        reward = np.logical_and(self.grid, self.target).sum()
+        terminated = np.allclose(self.grid, self.target)
+        if self.render_mode == 'human':
+            self.render_human()
+        return self.grid, reward, terminated, False, {}
+
+
+
 if __name__ == '__main__':
 
     target = np.ones((100, 100))
-    env = ButtonWorld(target)
+    env = GameOfLife(target)
     obs = env.reset()
     while True:
         action = env.action_space.sample()
