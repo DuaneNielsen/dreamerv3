@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import SupportsFloat, Any, Tuple, Dict
 
 import gymnasium
-from gymnasium.core import RenderFrame, ActType, ObsType
+from gymnasium.core import RenderFrame, ActType, ObsType, WrapperObsType
 from gymnasium.spaces import Discrete, Box
 import numpy as np
 from copy import deepcopy
@@ -105,6 +105,27 @@ class SimplerGridWorld(gymnasium.Env):
         return ['\u2191', '\u2192', '\u2193', '\u2190']
 
 
+class RGBObservationWrapper(gymnasium.ObservationWrapper):
+
+    def __init__(self, env, h=64, w=64):
+        super().__init__(env)
+        self.h, self.w = h, w
+
+    def observation(self, observation: ObsType) -> WrapperObsType:
+        base_size = self.grid_size + (3,)
+        image = np.zeros(base_size, dtype=np.uint8)
+        for k in range(self.grid_size[0]):
+            for j in range(self.grid_size[1]):
+                for i, color in enumerate(self.grid[k][j].color):
+                    image[k, j, i] = color
+
+        image[self.pos[0].item(), self.pos[1].item(), 2] = 255
+        image = image.swapaxes(1, 0)
+        image = cv2.resize(image, (self.h, self.w), interpolation=cv2.INTER_AREA)
+        return image
+
+
+
 items = {
     'reward_pack': Item(color=(20., 190, 20), reward=1.0)
 }
@@ -190,9 +211,12 @@ if __name__ == '__main__':
 
     import envs
 
-    env = gymnasium.make('SimplerGridWorld-frozen_lake-v0')
+    env = gymnasium.make('SimplerGridWorld-frozen_lake-v0', render_mode='none')
     env.unwrapped.render_speed = 1000
+    env = RGBObservationWrapper(env)
     obs, info = env.reset()
     terminated = False
     while not terminated:
         obs, reward, terminated, truncated, info = env.step(env.action_space.sample())
+        cv2.imshow('observation', obs)
+        cv2.waitKey(100)
