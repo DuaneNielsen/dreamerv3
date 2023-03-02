@@ -1,7 +1,8 @@
 import pickle
 from pathlib import Path
 import torch
-from time import time
+from time import time, perf_counter
+
 
 class Run:
     def __init__(self):
@@ -77,47 +78,40 @@ def bin_labels(min, max, num_bins):
     return labels
 
 
-class StopWatch:
+class ProgramTimer:
     def __init__(self):
-        self.start_time = 0
-        self.stop_time = 0
-        self.total_time = 0
-        self.running = False
+        self.elapsed = 0
 
-    def reset(self):
-        self.total_time = 0
-        self.running = False
+    def __enter__(self, *args):
+        self.start = perf_counter()
+        return self
 
-    def go(self):
-        self.start_time = time()
-        self.running = True
-
-    def pause(self):
-        if not self.running:
-            raise Exception('Call go() before calling pause()')
-        self.total_time += time() - self.start_time
-        self.running = False
-
-
-if __name__ == '__main__':
-
-    from rssm import make_small
-    from torch.optim import Adam
-    from argparse import ArgumentParser
-
-    parser = ArgumentParser()
-    parser.add_argument('--hello', default='hello')
-    args = parser.parse_args()
-
-    rssm = make_small(3)
-    opt = Adam(rssm.parameters())
-
-    save(run.rundir, rssm, opt, args, 100, 1.32)
-    rssm, opt, step, args, loss = load(run.rundir, rssm, opt)
-    print(args)
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        self.stop = perf_counter()
+        self.elapsed = self.stop - self.start
+        return False
 
 
 def register_gradient_clamp(nn_module, gradient_min_max):
     for p in nn_module.parameters():
         p.register_hook(
             lambda grad: torch.clamp(grad, -gradient_min_max, gradient_min_max))
+
+
+if __name__ == '__main__':
+
+    def fibonacci(n):
+        f1 = 1
+        f2 = 1
+        for i in range(n - 1):
+            f1, f2 = f2, f1 + f2
+
+        return f1
+
+    with ProgramTimer() as timer:
+        for _ in range(10000):
+            fibonacci(1000)
+
+    print(timer.elapsed)
+    print(timer)
+

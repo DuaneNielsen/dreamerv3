@@ -99,6 +99,17 @@ class Actor(nn.Module):
         return OneHotCategorical(logits=action_logits).mode
 
 
+class Moment:
+    def __init__(self, decay):
+        self.value = None
+        self.decay = decay
+
+    def update(self, value):
+        if self.value is None:
+            self.value = value
+        self.value * self.decay + value * (1. - self.decay)
+
+
 class ActorLoss:
     def __init__(self, return_normalization_limit=1.0, return_normalization_decay=0.99):
         self.reinforce_loss = None
@@ -107,10 +118,12 @@ class ActorLoss:
         self.return_scale_running = None
         self.return_normalization_limit = return_normalization_limit
         self.return_normalization_decay = return_normalization_decay
-        self.applied_scale = 1.
+        self.scale = 1.
         self.value_preds_min = None
-        self.value_preds_5th_percentile = None
-        self.value_preds_95th_percentile = None
+        self.value_preds_5th_perc = None
+        self.value_preds_5th_perc_ema = Moment(decay=return_normalization_decay)
+        self.value_preds_95th_perc = None
+        self.value_preds_95th_perc_ema = Moment(decay=return_normalization_decay)
         self.value_preds_max = None
 
     def __call__(self, actor_logits, actions, value_targets, critic_values):
@@ -138,16 +151,18 @@ class ActorLoss:
         with torch.no_grad():
             self.value_preds_min = value_targets[:-1].min()
             self.value_preds_max = value_targets[:-1].max()
-            self.value_preds_95th_percentile = torch.quantile(value_targets[:-1], 0.95, interpolation='lower')
-            self.value_preds_5th_percentile = torch.quantile(value_targets[:-1], 0.05, interpolation='higher')
-            return_scale_step = self.value_preds_95th_percentile - self.value_preds_5th_percentile
-            if self.return_scale_running is None:
-                self.return_scale_running = return_scale_step
-            self.return_scale_running = self.return_scale_running * self.return_normalization_decay + return_scale_step * (1. - self.return_normalization_decay)
-            self.applied_scale = max(self.return_scale_running.item(), 1.)
+            self.value_preds_95th_perc = torch.quantile(value_targets[:-1], 0.95, interpolation='lower')
+            self.value_preds_5th_perc = torch.quantile(value_targets[:-1], 0.05, interpolation='higher')
+            self.value_preds_5th_perc_ema.update(self.value_preds_5th_perc)
+            self.value_preds_95th_perc_ema.update(self.value_preds_95th_perc)
+            self.scale = max(1., self.value_preds_95th_perc_ema.value.item() - self.value_preds_5th_perc_ema.value.item())
+
+        base_value = (critic_values[:-1] - self.value_preds_5th_perc_ema.value.item()) / self.scale
+        pred_value = (value_targets[:-1] - self.value_preds_5th_perc_ema.value.item()) / self.scale
+        advantage = pred_value - base_value
 
         actor_dist = OneHotCategoricalUnimix(logits=actor_logits[:-1])
-        self.reinforce_loss = - (value_targets[:-1].detach() - critic_values[-1].detach()) * actor_dist.log_prob(actions[:-1]) / self.applied_scale
+        self.reinforce_loss = - advantage.detach() * actor_dist.log_prob(actions[:-1])
         self.entropy_loss = - 3e-4 * actor_dist.entropy()
         self.reinforce_loss = self.reinforce_loss.mean()
         self.entropy_loss = self.entropy_loss.mean()
@@ -158,10 +173,10 @@ class ActorLoss:
         return {
             'actor_reinforce_loss': self.reinforce_loss.item(),
             'actor_entropy_loss': self.entropy_loss.item(),
-            'actor_returns_applied_scale:': self.applied_scale,
+            'actor_returns_applied_scale:': self.scale,
             'actor_returns_min': self.value_preds_min.item(),
-            'actor_returns_5th_percentile': self.value_preds_5th_percentile.item(),
-            'actor_returns_95th_percentile': self.value_preds_95th_percentile.item(),
+            'actor_returns_5th_percentile': self.value_preds_5th_perc.item(),
+            'actor_returns_95th_percentile': self.value_preds_95th_perc.item(),
             'actor_returns_max': self.value_preds_max.item(),
             'actor_loss': self.actor_loss.item()
         }

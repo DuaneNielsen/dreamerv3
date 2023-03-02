@@ -1,5 +1,6 @@
 import gymnasium
 from envs.gridworld import SimpleGridWorld, env_configs
+import envs.simpler_gridworld
 
 kwargs = {'grid': env_configs['grab_n_go']}
 
@@ -10,9 +11,10 @@ gymnasium.register(
     kwargs=kwargs
 )
 
-gymnasium.register(
-    id="SimplerGridWorld-empty-v0",
-    entry_point="envs.simpler_gridworld:SimplerGridWorld",
-    max_episode_steps=100,
-    kwargs={'world_name': 'empty'}
-)
+for world in envs.simpler_gridworld.worlds:
+    gymnasium.register(
+        id=f"SimplerGridWorld-{world}-v0",
+        entry_point="envs.simpler_gridworld:SimplerGridWorld",
+        max_episode_steps=100,
+        kwargs={'world_name': world}
+    )

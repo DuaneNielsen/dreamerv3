@@ -102,13 +102,13 @@ class BatchLoader:
 
         observation, action, reward, cont = sample_batch(replay_buffer, batch_length, batch_size)
         if self.observation_transform is not None:
-            observation = self.observation_transform(observation).to(self.device)
+            observation = self.observation_transform(observation).to(device=self.device, dtype=torch.float32)
         else:
-            observation = torch.from_numpy(observation).to(self.device)
+            observation = torch.from_numpy(observation).to(device=self.device, dtype=torch.float32)
 
-        action = torch.from_numpy(action).to(self.device)
-        reward = torch.from_numpy(reward).to(self.device)
-        cont = torch.from_numpy(cont).to(self.device)
+        action = torch.from_numpy(action).to(device=self.device, dtype=torch.float32)
+        reward = torch.from_numpy(reward).to(device=self.device, dtype=torch.float32)
+        cont = torch.from_numpy(cont).to(device=self.device, dtype=torch.float32)
 
         return observation, action, reward, cont
 
