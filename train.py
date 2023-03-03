@@ -147,8 +147,8 @@ class ActorCriticTrainer:
             'ac_returns': self.returns.detach().cpu(),
             'ac_values': self.values.detach().cpu(),
             'ac_actions': self.action.detach().cpu(),
-            'ac_action_dist_mean': self.action_dist.mean.cpu(),
-            'ac_cont': self.cont.detach.cpu()
+            'ac_action_dist_mean': self.action_dist.mean.detach().cpu(),
+            'ac_cont': self.cont.detach().cpu()
         }
 
 
@@ -262,8 +262,8 @@ if __name__ == '__main__':
 
         actor_critic_trainer.train(imag_h, imag_z, imag_action, imag_rewards, imag_cont)
 
-        wandb.log(actor_critic_trainer.log_scalars(), step)
-        wandb.log({k: wandb.Histogram(v) for k, v in actor_critic_trainer.log_distributions().items()})
+        wandb.log(actor_critic_trainer.log_scalars(), step=step)
+        wandb.log({k: wandb.Histogram(v) for k, v in actor_critic_trainer.log_distributions().items()}, step=step)
 
         # if step % args.log_every_n_steps == 0:
         # actor, actor_opt, critic, critic_opt = actor_critic_trainer.state_dicts()
