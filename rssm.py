@@ -27,7 +27,7 @@
 import torch
 import torch.nn as nn
 from torch.distributions import Normal, Bernoulli, OneHotCategorical
-from dists import OneHotCategoricalStraightThru, categorical_kl_divergence_clamped, TwoHotSymlog
+from dists import OneHotCategoricalStraightThru, categorical_kl_divergence_clamped, TwoHotSymlog, OneHotCategoricalUnimix
 from blocks import MLPBlock, ModernDecoderConvBlock, Embedder, DecoderConvBlock
 
 
@@ -35,8 +35,8 @@ class Encoder(nn.Module):
     def __init__(self, cnn_multi=32, mlp_layers=2, mlp_hidden=512, h_size=512):
         super().__init__()
         self.encoder = nn.Sequential(
-            MLPBlock(4 * 4 * cnn_multi * 2 ** 3 + h_size, mlp_hidden),
-            *[MLPBlock(mlp_hidden, mlp_hidden) for _ in range(mlp_layers - 1)],
+            nn.Linear(4 * 4 * cnn_multi * 2 ** 3 + h_size, mlp_hidden, bias=False),
+            *[MLPBlock(mlp_hidden, mlp_hidden) for _ in range(mlp_layers)],
             nn.Linear(mlp_hidden, 32 * 32, bias=False),
             nn.Unflatten(1, (32, 32))
         )
@@ -58,13 +58,40 @@ class Decoder(nn.Module):
         super().__init__()
         self.decoder = nn.Sequential(
             nn.Linear(32 * 32 + h_size, mlp_hidden, bias=False),
-            *[MLPBlock(mlp_hidden, mlp_hidden) for _ in range(mlp_layers - 1)],
-            MLPBlock(mlp_hidden, 4 * 4 * cnn_multi * 2 ** 3),
+            *[MLPBlock(mlp_hidden, mlp_hidden) for _ in range(mlp_layers)],
+            nn.Linear(mlp_hidden, 4 * 4 * cnn_multi * 2 ** 3, bias=False),
             nn.Unflatten(-1, (cnn_multi * 2 ** 3, 4, 4)),
             DecoderConvBlock(cnn_multi * 2 ** 2, 8, 8, cnn_multi * 2 ** 3),
             DecoderConvBlock(cnn_multi * 2 ** 1, 16, 16, cnn_multi * 2 ** 2),
             DecoderConvBlock(cnn_multi * 2 ** 0, 32, 32, cnn_multi * 2 ** 1),
             DecoderConvBlock(out_channels, 64, 64, cnn_multi),
+        )
+
+    def forward(self, h, z):
+        if len(h.shape) == 3:
+            T, N, D = h.shape
+            hz_flat = torch.cat([h, z.flatten(-2)], dim=-1)
+            hz_flat = hz_flat.flatten(start_dim=0, end_dim=1)
+            x = self.decoder(hz_flat).unflatten(0, (T, N))
+        else:
+            hz_flat = torch.cat([h, z.flatten(-2)], dim=-1)
+            x = self.decoder(hz_flat)
+
+        return Normal(loc=x, scale=1.)
+
+
+class ModernDecoder(nn.Module):
+    def __init__(self, out_channels=3, cnn_multi=32, mlp_layers=2, mlp_hidden=512, h_size=512):
+        super().__init__()
+        self.decoder = nn.Sequential(
+            nn.Linear(32 * 32 + h_size, mlp_hidden, bias=False),
+            *[MLPBlock(mlp_hidden, mlp_hidden) for _ in range(mlp_layers - 1)],
+            MLPBlock(mlp_hidden, 4 * 4 * cnn_multi * 2 ** 3),
+            nn.Unflatten(-1, (cnn_multi * 2 ** 3, 4, 4)),
+            ModernDecoderConvBlock(cnn_multi * 2 ** 2, 8, 8, cnn_multi * 2 ** 3),
+            ModernDecoderConvBlock(cnn_multi * 2 ** 1, 16, 16, cnn_multi * 2 ** 2),
+            ModernDecoderConvBlock(cnn_multi * 2 ** 0, 32, 32, cnn_multi * 2 ** 1),
+            ModernDecoderConvBlock(out_channels, 64, 64, cnn_multi),
         )
 
     def forward(self, h, z):
@@ -102,8 +129,6 @@ class RewardPredictor(nn.Module):
 
         self.output = nn.Linear(mlp_size, 256, bias=False)
         self.output.weight.data.zero_()
-        # self.output.bias.data.zero_()
-        # self.output.bias.data[127] = 1e-6
 
         self.reward_predictor = nn.Sequential(
             MLPBlock(h_size, mlp_size),
@@ -257,6 +282,24 @@ class RSSM(nn.Module):
         h = self.seq_model(z, a, h)
         return h, z
 
+    def single_step_imagine(self, h, z, a):
+        """
+        Runs a batched step on the environment,
+        using either an observation or an imagined latent
+        :param h: [N, h_size]
+        :param a: [N, a_size, a_cls ]
+        :param z: [N, z_size, z_classes]
+        :return: h, z, r, c : hidden, z, reward, continue
+
+
+        """
+
+        h = self.seq_model(z, a, h)
+        z_imagine = OneHotCategoricalUnimix(logits=self.dynamics_pred(h)).sample()
+        reward = self.reward_pred(h).mean.unsqueeze(-1)
+        cont = self.continue_pred(h).probs
+        return h, z_imagine, reward, cont
+
     def step_imagine(self, h, z, a):
         """
         Runs a batched step on the environment,
@@ -270,10 +313,8 @@ class RSSM(nn.Module):
         """
 
         h = self.seq_model(z, a, h)
-        z_imagine = OneHotCategorical(logits=self.dynamics_pred(h)).sample()
-        reward = self.reward_pred(h).mean.unsqueeze(-1)
-        cont = self.continue_pred(h).probs
-        return h, z_imagine, reward, cont
+        z_imagine = OneHotCategoricalUnimix(logits=self.dynamics_pred(h)).sample()
+        return h, z_imagine
 
     def imagine(self, h0, obs, reward, cont, policy, imagination_horizon=15):
         """
@@ -295,21 +336,21 @@ class RSSM(nn.Module):
         h_list, z_list, a_list, reward_enc_list, cont_list = [h0], [z], [a], [reward], [cont]
 
         for t in range(imagination_horizon):
-            h, z, reward, cont = self.step_imagine(h_list[-1], z_list[-1], a_list[-1])
+            h, z = self.step_imagine(h_list[-1], z_list[-1], a_list[-1])
             a = policy.sample_action(h, z)
 
             h_list += [h]
             z_list += [z]
             a_list += [a]
-            reward_enc_list += [reward]
-            cont_list += [cont]
 
         h = torch.stack(h_list)
         z = torch.stack(z_list)
         a = torch.stack(a_list)
-        reward = torch.stack(reward_enc_list)
-        cont = torch.stack(cont_list)
-        return h, z, a, reward, cont
+
+        reward = self.reward_pred(h).mean.unsqueeze(-1)
+        cont = self.continue_pred(h).probs
+
+        return h.detach(), z.detach(), a.detach(), reward.detach(), cont.detach()
 
 
 class RSSMLoss:
@@ -337,24 +378,31 @@ class RSSMLoss:
 
     def loss_dict(self):
         return {
-            'loss': self.loss.item(),
-            'loss_pred': self.loss_obs.item() + self.loss_reward.item() + self.loss_cont.item(),
-            'loss_dyn': self.loss_dyn.item(),
-            'loss_rep': self.loss_rep.item()
+            'wm_loss': self.loss.item(),
+            'wm_loss_pred': self.loss_obs.item() + self.loss_reward.item() + self.loss_cont.item(),
+            'wm_loss_dyn': self.loss_dyn.item(),
+            'wm_loss_rep': self.loss_rep.item()
         }
 
 
-def make_small(action_classes, in_channels=3):
+def make_small(action_classes, in_channels=3, decoder=None):
     """
     Small as per Appendix B of the Mastering Diverse Domains through World Models paper
     :param action_classes:
     :return:
     """
+
+    decoder = '' if decoder is None else decoder
+    if decoder == 'modern':
+        decoder = ModernDecoder(out_channels=in_channels)
+    else:
+        decoder = Decoder(out_channels=in_channels)
+
     return RSSM(
         sequence_model=SequenceModel(action_classes),
         embedder=Embedder(in_channels=in_channels),
         encoder=Encoder(),
-        decoder=Decoder(out_channels=in_channels),
+        decoder=decoder,
         dynamics_pred=DynamicsPredictor(),
         reward_pred=RewardPredictor(),
         continue_pred=ContinuePredictor(),

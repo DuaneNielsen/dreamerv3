@@ -8,6 +8,7 @@ from gymnasium.spaces import Discrete, Box
 import numpy as np
 from copy import deepcopy
 import cv2
+from uuid import uuid4
 
 
 class Item:
@@ -48,6 +49,7 @@ class SimplerGridWorld(gymnasium.Env):
         self.pos = deepcopy(self.start_pos)
         self.grid = deepcopy(self.start_grid)
         self.render_speed = 1
+        self.uuid = str(uuid4())
 
         self.moves = np.array([
             [0, -1],  # N
@@ -67,6 +69,11 @@ class SimplerGridWorld(gymnasium.Env):
         return (self.pos, self.grid), {}
 
     def step(self, action: ActType) -> Tuple[ObsType, SupportsFloat, bool, bool, Dict[str, Any]]:
+
+        now_tile = self.grid[self.pos[0]][self.pos[1]]
+        if now_tile.has_item:
+            now_tile.stack.pop()
+
         next_pos = self.pos + self.moves[action]
         next_pos[0] = np.clip(next_pos[0], 0, self.grid_size[0] - 1)
         next_pos[1] = np.clip(next_pos[1], 0, self.grid_size[1] - 1)
@@ -80,7 +87,6 @@ class SimplerGridWorld(gymnasium.Env):
 
         if next_tile.has_item:
             reward += next_tile.stack[-1].reward
-            next_tile.stack.pop()
 
         if self.render_mode == 'human':
             self.render()
@@ -96,8 +102,8 @@ class SimplerGridWorld(gymnasium.Env):
 
         image[self.pos[0].item(), self.pos[1].item(), 2] = 255
         image = image.swapaxes(1, 0)
-        image = cv2.resize(image, (image.shape[1] * 128, image.shape[0] * 128), interpolation=cv2.INTER_AREA)
-        cv2.imshow('SimplerGridWorld', image)
+        image = cv2.resize(image, (256, 256), interpolation=cv2.INTER_AREA)
+        cv2.imshow(f'SimplerGridWorld - {self.uuid[0:5]}', image)
         cv2.waitKey(self.render_speed)
         return image
 
@@ -122,12 +128,37 @@ class RGBObservationWrapper(gymnasium.ObservationWrapper):
         image[self.pos[0].item(), self.pos[1].item(), 2] = 255
         image = image.swapaxes(1, 0)
         image = cv2.resize(image, (self.h, self.w), interpolation=cv2.INTER_AREA)
-        return image
+        return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
+
+class PartialRGBObservationWrapper(gymnasium.ObservationWrapper):
+
+    def __init__(self, env, h=64, w=64, obs_dist=3):
+        super().__init__(env)
+        self.h, self.w = h, w
+        self.obs_dist = obs_dist
+        self.observation_space = Box(low=0, high=255, shape=(obs_dist, obs_dist))
+
+    def observation(self, observation: ObsType) -> WrapperObsType:
+        (x, y), grid = observation
+        base_size = self.grid_size + (3,)
+        image = np.zeros(base_size, dtype=np.uint8)
+        for k in range(self.grid_size[0]):
+            for j in range(self.grid_size[1]):
+                for i, color in enumerate(self.grid[k][j].color):
+                    image[k, j, i] = color
+
+        image = np.pad(image, pad_width=[(self.obs_dist, self.obs_dist), (self.obs_dist, self.obs_dist), (0, 0)], constant_values=255)
+        image = image[x:x+self.obs_dist*2+1, y:y+self.obs_dist*2+1]
+
+        image[self.obs_dist, self.obs_dist, 2] = 255
+        image = image.swapaxes(1, 0)
+        image = cv2.resize(image, (self.h, self.w), interpolation=cv2.INTER_AREA)
+        return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
 
 items = {
-    'reward_pack': Item(color=(20., 190, 20), reward=1.0)
+    'reward_pack': Item(color=(20, 150, 20), reward=1.0)
 }
 
 tiles = {
@@ -135,7 +166,7 @@ tiles = {
     'e': Tile(color=(0, 0, 0)),
     'g': Tile(color=(0, 255, 0), terminal=True, reward=1.),
     'l': Tile(color=(70, 100, 200), terminal=True, reward=-1.),
-    'w': Tile(color=(255, 255, 255), traversable=False),
+    'w': Tile(color=(255, 255, 255), traversable=False, reward=-0.01),
     'p': Tile(color=(0, 0, 0), stack=[items['reward_pack']]),
 }
 
@@ -166,15 +197,22 @@ worlds = {
     ],
 
     'grab_em_all': [
-        'eeeeeeeeeeeeeeeepee',
-        'eeeeeeeepeeeeeeeeee',
-        'eeepeeeeeeeeeepeeee'
-        'eeeeeeeeeeeeeeeeeee',
-        'eeeeeeeeeseeeeeeeee',
-        'eeeeeeeeeeeeeeeeeee'
-        'eeepeeeeeeeeeeeeeee',
-        'eeeeeeeeeeeeeepeeee',
-        'epeeeeeeeeeeeeeeeee'
+        'wwwwwwwwwwwwwwww',
+        'weepeeeeeeeeeeew',
+        'weeeeeeeeeeepeew',
+        'weeeeeeeeeeeeeew',
+        'wepeeeeeeeeeeeew',
+        'weeeeeeeeeeeeeew',
+        'weeeeeeeeeepeeew',
+        'weeeeeeeeeeeeeew',
+        'weeeeeeeseeeeeew',
+        'weeeeeeeeeeeeeew',
+        'wepeeeeeeeeeeeew',
+        'weeeeeeeeeeepeew',
+        'weeeeeeeeeeeeeew',
+        'weeeepeeeeeeeeew',
+        'weeeeeeeeeeeeeew',
+        'wwwwwwwwwwwwwwww'
     ],
 
     'frozen_lake': [
@@ -211,12 +249,13 @@ if __name__ == '__main__':
 
     import envs
 
-    env = gymnasium.make('SimplerGridWorld-frozen_lake-v0', render_mode='none')
+    env = gymnasium.make('SimplerGridWorld-grab_em_all-v0', render_mode='none')
     env.unwrapped.render_speed = 1000
-    env = RGBObservationWrapper(env)
+    env = PartialRGBObservationWrapper(env)
     obs, info = env.reset()
     terminated = False
     while not terminated:
         obs, reward, terminated, truncated, info = env.step(env.action_space.sample())
+        obs = cv2.resize(obs, (256, 256))
         cv2.imshow('observation', obs)
         cv2.waitKey(100)

@@ -1,5 +1,56 @@
 import torch
-from multiprocessing import Process
+import torch.nn as nn
+from torch.distributions import OneHotCategorical
+from dists import TwoHotSymlog, OneHotCategoricalStraightThru, OneHotCategoricalUnimix
+from blocks import MLPBlock
+
+
+class Critic(nn.Module):
+    def __init__(self,  h_size=512, z_size=32, z_classes=32, mlp_size=512, mlp_layers=2):
+        super().__init__()
+
+        self.out_layer = nn.Linear(mlp_size, 256, bias=False)
+        self.out_layer.weight.data.zero_()
+        self.critic = torch.nn.Sequential(
+            nn.Linear(h_size + z_size * z_classes, mlp_size, bias=False),
+            *[MLPBlock(mlp_size, mlp_size) for _ in range(mlp_layers)],
+            self.out_layer
+        )
+
+    def forward(self, h, z):
+        h_z_flat = torch.cat((h, z.flatten(-2)), dim=-1)
+        return TwoHotSymlog(self.critic(h_z_flat))
+
+
+class Actor(nn.Module):
+    def __init__(self, action_size, action_classes, h_size=512, z_size=32, z_classes=32, mlp_size=512, mlp_layers=2):
+        super().__init__()
+        self.action_size = action_size
+        self.action_classes = action_classes
+        self.output = nn.Linear(mlp_size, action_size * action_classes, bias=False)
+        self.critic = torch.nn.Sequential(
+            nn.Linear(h_size + z_size * z_classes, mlp_size, bias=False),
+            *[MLPBlock(mlp_size, mlp_size) for _ in range(mlp_layers)],
+            self.output
+        )
+
+    def forward(self, h, z):
+        h_z_flat = torch.cat((h, z.flatten(-2)), dim=-1)
+        action_flat = self.critic(h_z_flat)
+        return action_flat.unflatten(-1, (self.action_size, self.action_classes))
+
+    def train_action(self, h, z):
+        logits = self(h, z)
+        return OneHotCategoricalUnimix(logits=logits)
+
+    def sample_action(self, h, z):
+        action_logits = self.forward(h, z)
+        return OneHotCategoricalStraightThru(logits=action_logits).sample()
+
+    def exploit_action(self, h, z):
+        action_logits = self.forward(h, z)
+        return OneHotCategorical(logits=action_logits).mode
+
 
 def score(reward, cont, value, discount=0.997, lamb_da=0.95):
     """
@@ -56,12 +107,27 @@ def traj_weight(cont, discount=0.997):
     return (torch.cumprod(discount * cont, 0) / discount).detach()
 
 
-def critic_loss(returns, critic_dist, slow_critic_dist, traj_weight):
-    loss = -critic_dist.log_prob(returns.detach())
-    reg = -critic_dist.log_prob(slow_critic_dist.mean.detach())
-    loss += reg
-    return (loss * traj_weight.detach()).mean()
+class CriticLoss:
+    def __init__(self):
+        pass
 
+    def __call__(self, returns, critic_dist, slow_critic_dist, cont):
+        """
+        note: returns len should be 1 shorter than critic_dist
+        """
+        trj_wgt = traj_weight(cont)
+        self.loss_critic = -critic_dist.log_prob(returns.squeeze(-1).detach())
+        self.loss_reg = -critic_dist.log_prob(slow_critic_dist.mean.squeeze(-1).detach())
+        self.loss = self.loss_critic + self.loss_reg
+        self.loss = self.loss * trj_wgt.squeeze(-1).detach()
+        return self.loss.mean()
+
+    def log_dict(self):
+        return {
+            'ac_critic_loss_critic': self.loss_critic.mean().detach().cpu(),
+            'ac_critic_loss_reg': self.loss_reg.mean().detach().cpu(),
+            'ac_critic_loss': self.loss.mean().detach().cpu()
+        }
 
 class Moment:
     def __init__(self, decay):
@@ -74,17 +140,45 @@ class Moment:
         self.value * self.decay + value * (1. - self.decay)
 
 
-def actor_loss(ret, perc_5, perc_95, base, action_dist, action, traj_weight, entropy_scale=-3e-4):
-    offset, invscale = perc_5, max(perc_95 - perc_5, 1.)
-    normed_ret = (ret - offset) / invscale
-    normed_base = (base - offset) / invscale
-    adv = normed_ret - normed_base
-    logpi = action_dist.log_prob(action.detach())[:-1]
-    loss = -logpi * adv.detach()
-    ent = action_dist.entropy()[:-1]
-    loss -= entropy_scale * ent
-    loss *= traj_weight.detach()[:-1]
-    return loss.mean()
+class ActorLoss:
+    def __init__(self):
+        self.perc_5 = Moment(decay=0.99)
+        self.perc_95 = Moment(decay=0.99)
+        self.offset = 0.
+        self.invscale = 1.
+
+    def __call__(self, action_dist, action, returns, base, cont, entropy_scale=-3e-4):
+        self.perc_5.update(torch.quantile(returns, 0.05, interpolation='higher'))
+        self.perc_95.update(torch.quantile(returns, 0.95, interpolation='lower'))
+        traj_wgt = traj_weight(cont)
+
+        self.offset, self.invscale = self.perc_5.value, max(self.perc_95.value - self.perc_5.value, 1.)
+        self.normed_ret = (returns - self.offset) / self.invscale
+        self.normed_base = (base - self.offset) / self.invscale
+        self.adv = self.normed_ret - self.normed_base
+        self.logpi = action_dist.log_prob(action.detach())[:-1]
+        self.loss_policy_grad = -self.logpi * self.adv.detach()
+        ent = action_dist.entropy()[:-1]
+        self.loss_ent = - entropy_scale * ent
+        self.loss = self.loss_policy_grad + self.loss_ent
+        self.loss *= traj_wgt.detach()[:-1]
+        self.loss = self.loss.mean()
+        return self.loss
+
+    def log_dict(self):
+        return {
+            'ac_actor_loss_perc_5': self.perc_5.value,
+            'ac_actor_loss_perc_95': self.perc_95.value,
+            'ac_actor_loss_offset': self.offset,
+            'ac_actor_loss_invscale': self.invscale,
+            'ac_actor_loss_normed_ret': self.normed_ret.mean().detach().cpu(),
+            'ac_actor_loss_normed_base': self.normed_base.mean().detach().cpu(),
+            'ac_actor_loss_adv': self.adv.mean().detach().cpu(),
+            'ac_actor_loss_logpi': self.logpi.mean().detach().cpu(),
+            'ac_actor_loss_policy_grad': self.loss_policy_grad.mean().detach().cpu(),
+            'ac_actor_loss_loss_ent': self.loss_ent.mean().detach().cpu(),
+            'ac_actor_loss': self.loss.detach().cpu(),
+        }
 
 
 def polyak_update(critic, ema_critic, critic_ema_decay=0.98):
@@ -117,6 +211,7 @@ if __name__ == '__main__':
     import numpy as np
     from matplotlib import pyplot as plt
     import wandb
+    from multiprocessing import Process
 
     plt.ion()
     torch.manual_seed(0)

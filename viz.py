@@ -2,12 +2,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 from collections import deque
 import torch
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 from torch.nn.functional import conv1d
 from torchvision.transforms.functional import to_tensor
 from torchvision.utils import make_grid
 from replay import stack_trajectory
 from math import floor
+
 
 """
 https://matplotlib.org/stable/gallery/lines_bars_and_markers/scatter_hist.html#sphx-glr-gallery-lines-bars-and-markers-scatter-hist-py
@@ -101,7 +102,8 @@ class PlotImage:
 def make_caption(caption, color=(255, 255, 255, 255), width=64, height=16):
     img = Image.new('RGB', (width, height))
     draw = ImageDraw.Draw(img)
-    draw.text((1, 5), caption, fill=color)
+    unicode_font = ImageFont.truetype("DejaVuSans.ttf", 8)
+    draw.text((1, 5), caption, fill=color, font=unicode_font)
     return np.array(img)
 
 
@@ -245,32 +247,19 @@ def make_batch_panels(obs, action, reward, cont, obs_pred, reward_pred, cont_pre
     return batch_panel, rewards_panel, terminal_panel
 
 
-if __name__ == '__main__':
-    # Fixing random state for reproducibility
-    np.random.seed(19680801)
+def decode_trajectory(rssm, latest_trajectory):
+    decoded_trajectory = []
+    h = rssm.new_hidden0(batch_size=1)
+    obs = torch.from_numpy(latest_trajectory[0].observation).permute(2, 0, 1).unsqueeze(0).to(rssm.device) / 255.
+    z = rssm.encode_observation(h, obs).mode
+    for step in latest_trajectory:
+        decoded_trajectory += [rssm.decoder(h, z).mean]
+        if step.is_terminal:
+            break
+        obs = torch.from_numpy(latest_trajectory[0].observation).permute(2, 0, 1).unsqueeze(0).to(rssm.device) / 255.
+        action = torch.from_numpy(step.action).unsqueeze(0).to(rssm.device)
+        h, z = rssm.step_reality(h, obs, action)
 
-    # some random data
-    x = np.random.randn(1000) + 2.0
-    y = np.random.randn(1000) - 1.0
-
-    loss = list(range(200))
-    loss2 = list(range(20, 220))
-
-    # Create a Figure, which doesn't have to be square.
-    fig = plt.figure(constrained_layout=True)
-
-    # Create the main axes, leaving 25% of the figure space at the top and on the
-    # right to position marginals.
-    ax = fig.add_gridspec(nrows=2, ncols=2, top=0.75, right=0.75).subplots()
-
-    joint1_plot = PlotJointAndMarginals(ax[0, 0], 'title', 'ylabel')
-    joint2_plot = PlotJointAndMarginals(ax[1, 0], ylabel='ylabel')
-    # Draw the scatter plot and marginals.
-    joint1_plot.scatter_hist(x, y)
-    joint2_plot.scatter_hist(x, y)
-    loss1_plot = PlotLosses(ax[0, 1], 2)
-    for loss, loss2 in zip(loss, loss2):
-        loss1_plot.update(loss, loss2)
-    loss1_plot.plot()
-
-    plt.show()
+    decoded_trajectory = torch.stack(decoded_trajectory, dim=1)
+    decoded_trajectory = (decoded_trajectory * 255).to(dtype=torch.uint8, device='cpu').numpy()
+    return decoded_trajectory
