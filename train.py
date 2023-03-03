@@ -287,7 +287,6 @@ if __name__ == '__main__':
             print(f'trajectory end: reward {trajectory_reward} len: {len(latest_trajectory)}')
 
 
-
         if step % args.log_every_n_steps == 0:
             imag_obs = rssm.decoder(imag_h, imag_z).mean
             imag_returns = actor_critic_trainer.log_distributions()['ac_returns'].to(args.device)
