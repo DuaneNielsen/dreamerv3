@@ -215,6 +215,25 @@ worlds = {
         'wwwwwwwwwwwwwwww'
     ],
 
+    'maze': [
+        'wwwwwwwwwwwwwwww',
+        'weepeeeeeeeeeeew',
+        'wewwwwwweeeepeew',
+        'weeeeepweeeeeeew',
+        'wewwwwewewwwwwww',
+        'wepeeweweweeeeew',
+        'weewewewewepeeew',
+        'weewewewewwwweww',
+        'weeeeeeeseeeeeew',
+        'wwwwwwwwewwwwwew',
+        'wepeeeeweweeewew',
+        'weeeeeeweeeepwpw',
+        'weeeeeeeeweeewew',
+        'wewwwpwwewwwewew',
+        'wpeeeeeeeeeeeeew',
+        'wwwwwwwwwwwwwwww'
+    ],
+
     'frozen_lake': [
         'leeegeeeee',
         'eeeleeelee',
@@ -249,7 +268,7 @@ if __name__ == '__main__':
 
     import envs
 
-    env = gymnasium.make('SimplerGridWorld-grab_em_all-v0', render_mode='none')
+    env = gymnasium.make('SimplerGridWorld-maze-v0', render_mode='human')
     env.unwrapped.render_speed = 1000
     env = PartialRGBObservationWrapper(env)
     obs, info = env.reset()
