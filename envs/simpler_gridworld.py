@@ -11,20 +11,32 @@ import cv2
 from uuid import uuid4
 from numpy.linalg import norm
 
-class Monster:
+yellow = (0, 255, 255)
+red = (0, 0, 255)
+pink = (255, 0, 255)
+violet = (138, 43, 226)
+
+
+class Ghost:
     def __init__(self):
-        self.color = (255, 0, 255)
+        self.color = red
         self.start_pos = None
         self.prev_reverse_action = None
-        self.reward = -1.
         self.counter = 0
         self.mode = 'chase'
+        self.id = uuid4()
 
     def reset(self):
         self.pos = deepcopy(self.start_pos)
         self.prev_reverse_action = None
         self.counter = 0
         self.mode = 'scatter'
+
+    def get_target(self, mode, env):
+        if mode == 'chase':
+            return env.pos
+        else:
+            return self.start_pos
 
     def step(self, env):
         now_tile = env.grid[self.pos[0]][self.pos[1]]
@@ -35,13 +47,7 @@ class Monster:
         else:
             self.mode = 'chase'
 
-        if self.mode == 'chase':
-            target = env.pos
-        else:
-            target = self.start_pos
-
-        if norm(target - self.pos) == 0. and self.mode == 'chase':
-            return
+        target = self.get_target(self.mode, env)
 
         preferred_choice = []
         for (tile, pos), action in zip(choices, range(env.action_space.n.item())):
@@ -51,18 +57,64 @@ class Monster:
 
         preferred_choice = sorted(preferred_choice, key=lambda choice: choice[1])
 
-        if len(preferred_choice) == 2:
-            if self.prev_reverse_action is not None:
-                if preferred_choice[0][0] == self.prev_reverse_action:
-                    preferred_choice = [preferred_choice[1]]
+        if self.prev_reverse_action is not None:
+            if preferred_choice[0][0] == self.prev_reverse_action:
+                preferred_choice = [preferred_choice[1]]
 
         selected_action, _, selected_pos, selected_tile = preferred_choice[0]
         self.pos = selected_pos
         self.prev_reverse_action = reverse_action(selected_action)
-        now_tile.monster_stack.pop()
-        selected_tile.monster_stack.append(self)
+        del now_tile.monster_stack[self.id]
+        selected_tile.monster_stack[self.id] = self
         self.counter += 1
         self.counter = self.counter % 270
+
+
+class Blinky(Ghost):
+    def __init__(self):
+        super().__init__()
+        self.color = (0, 0, 255)
+
+
+class Pinky(Ghost):
+    def __init__(self):
+        super().__init__()
+        self.color = pink
+
+    def get_target(self, mode, env):
+        if mode == 'chase':
+            return env.pos + SimplerGridWorld.moves[env.action] * 4
+        else:
+            return self.start_pos
+
+
+class Clyde(Ghost):
+    def __init__(self):
+        super().__init__()
+        self.color = (0, 165, 255)
+
+    def get_target(self, mode, env):
+        if mode == 'chase':
+            if norm(self.pos - env.pos) < 8.:
+                return self.start_pos
+            else:
+                return env.pos
+        else:
+            return self.start_pos
+
+
+class Inky(Ghost):
+    def __init__(self):
+        super().__init__()
+        self.color = (255, 0, 0)
+
+    def get_target(self, mode, env):
+        if mode == 'chase':
+            vec = (env.pos + SimplerGridWorld.moves[env.action] * 2) - self.pos
+            return self.pos + vec * 2
+        else:
+            return self.start_pos
+
 
 def reverse_action(action):
     return (action + 2) % 4
@@ -73,6 +125,17 @@ class Item:
         self.color = color
         self.reward = reward
 
+    def effect(self, env):
+        pass
+
+
+class PowerPill(Item):
+    def __init__(self, color, reward):
+        super().__init__(color, reward)
+
+    def effect(self, env):
+        env.energised = 30
+
 
 class Tile:
     def __init__(self, color, start_pos=False, monster=None, traversable=True, terminal=False, reward=0., stack=None):
@@ -81,23 +144,22 @@ class Tile:
         self.terminal = terminal
         self.reward = reward
         self.start_pos = start_pos
-        self.monster_stack = [monster] if monster else []
+        self.monster_stack = {monster.id: monster} if monster else {}
         self.stack = [] if stack is None else stack
 
     @property
     def has_item(self):
         return len(self.stack) > 0
 
-
     @property
     def has_monster(self):
         return len(self.monster_stack) > 0
 
-
     @property
     def color(self):
         if self.has_monster:
-            return self.monster_stack[-1].color
+            for monster in self.monster_stack:
+                return self.monster_stack[monster].color
         elif self.has_item:
             return self.stack[-1].color
         else:
@@ -114,13 +176,17 @@ class SimplerGridWorld(gymnasium.Env):
 
     def __init__(self, world_name, render_mode='human'):
         super().__init__()
+        self.color = yellow
+        self.world_name = world_name
         self.render_mode = render_mode
-        self.start_grid, self.grid_size, self.start_pos, self.monsters = make_grid(world_name)
+        self.grid, self.grid_size, self.start_pos, self.monsters = make_grid(world_name)
         self.observation_space = Box(low=0, high=max(self.grid_size), shape=self.grid_size, dtype=np.int64)
         self.action_space = Discrete(4)
         self.render_speed = 1
         self.uuid = str(uuid4())
         self.reset()
+        self.action = 0
+        self.energised = 0
 
     def lookahead(self, pos, action):
         next_pos = pos + self.moves[action]
@@ -131,57 +197,81 @@ class SimplerGridWorld(gymnasium.Env):
 
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None) -> tuple[
         ObsType, dict[str, Any]]:
-        self.pos = deepcopy(self.start_pos)
-        self.grid = deepcopy(self.start_grid)
-        for monster in self.monsters:
+        self.grid, self.grid_size, self.pos, self.monsters = make_grid(self.world_name)
+
+        for monster in self.monsters.values():
             monster.reset()
 
         if self.render_mode == 'human':
             self.render()
 
-        return (self.pos, self.grid), {}
+        return (self.pos, self.grid, self.color), {}
 
     def step(self, action: ActType) -> Tuple[ObsType, SupportsFloat, bool, bool, Dict[str, Any]]:
 
+        self.action = action
+        reward = 0.
+
         now_tile = self.grid[self.pos[0]][self.pos[1]]
         if now_tile.has_item:
+            now_tile.stack[-1].effect(self)
             now_tile.stack.pop()
 
+        if self.energised > 0:
+            self.color = violet
+        else:
+            self.color = yellow
+        self.energised -= 1
+
+        if now_tile.has_monster:
+            if self.energised > 0:
+                monster_id = [monster for monster in now_tile.monster_stack]
+                for monster in monster_id:
+                    del self.monsters[monster]
+                    del now_tile.monster_stack[monster]
+            else:
+                return (self.pos, self.grid, self.color), -1.0, True, False, {}
 
         next_tile, next_pos = self.lookahead(self.pos, action)
 
         if next_tile.traversable:
             self.pos = next_pos
 
-        for monster in self.monsters:
-            monster.step(self)
-
-        reward = next_tile.reward
+        reward += next_tile.reward
         terminated = next_tile.terminal
 
         if next_tile.has_item:
             reward += next_tile.stack[-1].reward
 
         if next_tile.has_monster:
-            reward += next_tile.monster_stack[0].reward
-            terminated = True
+            if self.energised > 0:
+                monster_id = [monster for monster in next_tile.monster_stack]
+                for monster in monster_id:
+                    del self.monsters[monster]
+                    del next_tile.monster_stack[monster]
+                reward += 1
+            else:
+                reward += -1.
+                terminated = True
 
+        for monster in self.monsters.values():
+            monster.step(self)
 
         if self.render_mode == 'human':
             self.render()
-        return (self.pos, self.grid), reward, terminated, False, {}
+
+        return (self.pos, self.grid, self.color), reward, terminated, False, {}
 
     def render(self) -> RenderFrame | list[RenderFrame] | None:
         base_size = self.grid_size + (3,)
         image = np.zeros(base_size, dtype=np.uint8)
         for k in range(self.grid_size[0]):
             for j in range(self.grid_size[1]):
-                for i, color in enumerate(self.grid[k][j].color):
-                    image[k, j, i] = color
+                image[k, j, :] = np.array(self.grid[k][j].color)
 
-        image[self.pos[0].item(), self.pos[1].item(), 2] = 255
+        image[self.pos[0].item(), self.pos[1].item(), 0:3] = np.array(list(self.color))
         image = image.swapaxes(1, 0)
-        image = cv2.resize(image, (256, 256), interpolation=cv2.INTER_AREA)
+        image = cv2.resize(image, (512, 512), interpolation=cv2.INTER_AREA)
         cv2.imshow(f'SimplerGridWorld - {self.uuid[0:5]}', image)
         cv2.waitKey(self.render_speed)
         return image
@@ -197,14 +287,14 @@ class RGBObservationWrapper(gymnasium.ObservationWrapper):
         self.h, self.w = h, w
 
     def observation(self, observation: ObsType) -> WrapperObsType:
+        pos, grid, color = observation
         base_size = self.grid_size + (3,)
         image = np.zeros(base_size, dtype=np.uint8)
         for k in range(self.grid_size[0]):
             for j in range(self.grid_size[1]):
-                for i, color in enumerate(self.grid[k][j].color):
-                    image[k, j, i] = color
+                image[k, j, :] = np.array(grid[k][j].color)
 
-        image[self.pos[0].item(), self.pos[1].item(), 2] = 255
+        image[self.obs_dist, self.obs_dist, :] = np.array(color)
         image = image.swapaxes(1, 0)
         image = cv2.resize(image, (self.h, self.w), interpolation=cv2.INTER_AREA)
         return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -212,26 +302,25 @@ class RGBObservationWrapper(gymnasium.ObservationWrapper):
 
 class PartialRGBObservationWrapper(gymnasium.ObservationWrapper):
 
-    def __init__(self, env, h=64, w=64, obs_dist=3):
+    def __init__(self, env, h=64, w=64, obs_dist=5):
         super().__init__(env)
         self.h, self.w = h, w
         self.obs_dist = obs_dist
         self.observation_space = Box(low=0, high=255, shape=(obs_dist, obs_dist))
 
     def observation(self, observation: ObsType) -> WrapperObsType:
-        (x, y), grid = observation
+        (x, y), grid, color = observation
         base_size = self.grid_size + (3,)
         image = np.zeros(base_size, dtype=np.uint8)
         for k in range(self.grid_size[0]):
             for j in range(self.grid_size[1]):
-                for i, color in enumerate(self.grid[k][j].color):
-                    image[k, j, i] = color
+                image[k, j, :] = np.array(grid[k][j].color)
 
         image = np.pad(image, pad_width=[(self.obs_dist, self.obs_dist), (self.obs_dist, self.obs_dist), (0, 0)],
                        constant_values=255)
         image = image[x:x + self.obs_dist * 2 + 1, y:y + self.obs_dist * 2 + 1]
 
-        image[self.obs_dist, self.obs_dist, 2] = 255
+        image[self.obs_dist, self.obs_dist, :] = np.array(color)
         image = image.swapaxes(1, 0)
         image = cv2.resize(image, (self.h, self.w), interpolation=cv2.INTER_AREA)
         return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -240,6 +329,7 @@ class PartialRGBObservationWrapper(gymnasium.ObservationWrapper):
 items = {
     'reward_pack': Item(color=(20, 150, 20), reward=1.0),
     'small_pill': Item(color=(110, 80, 40), reward=0.01),
+    'power_pill': PowerPill(color=(20, 150, 20), reward=1.0),
 }
 
 tiles = {
@@ -249,8 +339,12 @@ tiles = {
     'l': Tile(color=(70, 100, 200), terminal=True, reward=-1.),
     'w': Tile(color=(255, 255, 255), traversable=False, reward=-0.01),
     'p': Tile(color=(0, 0, 0), stack=[items['reward_pack']]),
+    'z': Tile(color=(0, 0, 0), stack=[items['power_pill']]),
     'd': Tile(color=(0, 0, 0), stack=[items['small_pill']]),
-    'm': Tile(color=(0, 0, 0), stack=[items['small_pill']], monster=Monster()),
+    'b': Tile(color=(0, 0, 0), stack=[items['small_pill']], monster=Blinky()),
+    'n': Tile(color=(0, 0, 0), stack=[items['small_pill']], monster=Pinky()),
+    'i': Tile(color=(0, 0, 0), stack=[items['small_pill']], monster=Inky()),
+    'c': Tile(color=(0, 0, 0), stack=[items['small_pill']], monster=Clyde()),
 }
 
 worlds = {
@@ -327,8 +421,8 @@ worlds = {
 
     'pacman': [
         'wwwwwwwwwwwwwwwwwww',
-        'wdmddddddwddddddddw',
-        'wpwwdwwwdwdwwwdwwpw',
+        'wdbddddddwddddddidw',
+        'wzwwdwwwdwdwwwdwwzw',
         'wdddddddddddddddddw',
         'wdwwdwdwwwwwdwdwwdw',
         'wddddwdddwdddwddddw',
@@ -336,22 +430,22 @@ worlds = {
         'wwwwdwdddddddwdwwww',
         'wwwwdddwwwwwdddwwww',
         'wwwwdwdwwwwwdwdwwww',
-        'wwwwdwdddpdddwdwwww',
+        'wwwwdwdddzdddwdwwww',
         'wwwwdwdwwwwwdwdwwww',
         'wddddddddwddddddddw',
         'wdwwdwwwdwdwwwdwwdw',
-        'wpdwdddddsdddddwdpw',
+        'wzdwdddddsdddddwdzw',
         'wwdwdwdwwwwwdwdwdww',
         'wddddwdddwdddwddddw',
         'wdwwwwwwdwdwwwwwwdw',
-        'wdddddddddddddddddw',
+        'wdcdddddddddddndddw',
         'wwwwwwwwwwwwwwwwwww'
     ]
 }
 
 world_config = {
     'pacman': {
-        'max_length': 1000,
+        'max_episode_steps': 1000,
     }
 }
 
@@ -364,7 +458,7 @@ def make_grid(world_name):
     world = worlds[world_name]
     grid = []
     start_pos = np.array([0, 0], dtype=np.int64)
-    monsters = []
+    monsters = {}
     w, h = world_wh(world)
     for x in range(w):
         grid += [[]]
@@ -374,8 +468,9 @@ def make_grid(world_name):
             if tile.start_pos:
                 start_pos = np.array([x, y], dtype=np.int64)
             if tile.has_monster:
-                tile.monster_stack[0].start_pos = np.array([x, y], dtype=np.int64)
-                monsters += [tile.monster_stack[0]]
+                for monster in tile.monster_stack:
+                    tile.monster_stack[monster].start_pos = np.array([x, y], dtype=np.int64)
+                    monsters[monster] = tile.monster_stack[monster]
 
     return grid, world_wh(world), start_pos, monsters
 
@@ -392,5 +487,6 @@ if __name__ == '__main__':
     while not terminated:
         obs, reward, terminated, truncated, info = env.step(env.action_space.sample())
         obs = cv2.resize(obs, (256, 256))
+        obs = cv2.cvtColor(obs, cv2.COLOR_BGR2RGB)
         cv2.imshow('observation', obs)
         cv2.waitKey(100)

@@ -1,66 +1,22 @@
-import pickle
 from pathlib import Path
 import torch
-from time import time, perf_counter
+from time import perf_counter
 
 
-class Run:
-    def __init__(self):
-        self.run_id = -1
-        self.rundir = None
-
-    def next_run(self):
-        self.run_id += 1
-        dir = Path(f'runs/run_{self.run_id}')
-        dir.mkdir(exist_ok=True)
-        self.rundir = str(dir)
-        return self
-
-
-Path('runs').mkdir(exist_ok=True)
-
-if Path('runs/.runs').exists():
-    with Path('runs/.runs').open('rb') as f:
-        run = pickle.load(f)
-else:
-    run = Run()
-
-run.next_run()
-with Path('runs/.runs').open('wb') as f:
-    pickle.dump(run, f)
-print(f"starting run {run.run_id}")
-
-
-def save(rundir, rssm, rssm_optim, critic, critic_optim, actor, actor_optim, args, steps):
-    torch.save({
-        'rssm_state_dict': rssm.state_dict(),
-        'rssm_optim_state_dict': rssm_optim.state_dict(),
-        'critic_state_dict': critic.state_dict(),
-        'critic_optim_state_dict': critic_optim.state_dict(),
-        'actor_state_dict': actor.state_dict(),
-        'actor_optim_state_dict': actor_optim.state_dict(),
-        'args': args,
-        'steps': steps
-    }, rundir + '/model_opt.pt')
-
-
-def load(rundir, rssm=None, rssm_optim=None, critic=None, critic_optim=None, actor=None, actor_optim=None):
-    checkpoint = torch.load(rundir + '/model_opt.pt')
-    if rssm is not None:
-        rssm.load_state_dict(checkpoint['rssm_state_dict'])
-    if rssm_optim is not None:
-        rssm_optim.load_state_dict(checkpoint['rssm_optim_state_dict'])
-    if critic is not None:
-        critic.load_state_dict(checkpoint['critic_state_dict'])
-    if critic_optim is not None:
-        critic_optim.load_state_dict(checkpoint['critic_optim_state_dict'])
-    if actor is not None:
-        actor.load_state_dict(checkpoint['actor_state_dict'])
-    if actor_optim is not None:
-        actor_optim.load_state_dict(checkpoint['actor_optim_state_dict'])
-    args = checkpoint['args']
-    steps = checkpoint['steps']
-    return steps, args
+def next_run():
+    run_id_file = Path(f'runs/.runs')
+    if not run_id_file.exists():
+        run_id = 0
+        with run_id_file.open('w') as f:
+            f.write(str(run_id))
+    with run_id_file.open('r') as f:
+        run_id= int(f.readline().rstrip())
+        run_id += 1
+    with run_id_file.open('w') as f:
+        f.write(str(run_id))
+    dir = Path(f'runs/run_{run_id}')
+    dir.mkdir(exist_ok=True)
+    return str(dir)
 
 
 def bin_values(values, min, max, num_bins):

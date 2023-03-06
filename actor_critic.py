@@ -1,8 +1,12 @@
+from copy import deepcopy
+
 import torch
 import torch.nn as nn
 from torch.distributions import OneHotCategorical
 from dists import TwoHotSymlog, OneHotCategoricalStraightThru, OneHotCategoricalUnimix
 from blocks import MLPBlock
+from utils import register_gradient_clamp
+from torch.optim import Adam
 
 
 class Critic(nn.Module):
@@ -192,6 +196,66 @@ def polyak_update(critic, ema_critic, critic_ema_decay=0.98):
     with torch.no_grad():
         for critic_params, ema_critic_params in zip(critic.parameters(), ema_critic.parameters()):
             ema_critic_params.data = ema_critic_params * critic_ema_decay + (1 - critic_ema_decay) * critic_params
+
+
+class ActorCriticTrainer(nn.Module):
+    def __init__(self, actor, critic, lr=3e-5, adam_eps=1e-5, grad_clip=100., device='cuda'):
+        super().__init__()
+        self.actor_criterion = ActorLoss()
+        self.critic_criterion = CriticLoss()
+        self.actor = actor.to(device)
+        self.critic = critic.to(device)
+        self.ema_critic = deepcopy(critic).to(device)
+        self.critic_opt = Adam(critic.parameters(), lr=lr, eps=adam_eps)
+        self.actor_opt = Adam(actor.parameters(), lr=lr, eps=adam_eps)
+        register_gradient_clamp(critic, grad_clip)
+        register_gradient_clamp(actor, grad_clip)
+
+    def train_step(self, h, z, action, rewards, cont):
+        self.h = h
+        self.z = z
+        self.action = action
+        self.rewards = rewards
+        self.cont = cont
+
+        with torch.no_grad():
+            critic_dist = self.critic(h.detach(), z.detach())
+            self.returns, self.values = score(rewards, cont, critic_dist.mean.unsqueeze(-1))
+            tw = traj_weight(cont)
+
+        self.critic_dist = self.critic(h.detach()[:-1], z.detach()[:-1])
+        self.ema_critic_dist = self.ema_critic(h.detach()[:-1], z.detach()[:-1])
+        crit_loss = self.critic_criterion(self.returns, self.critic_dist, self.ema_critic_dist, tw[:-1])
+
+        self.critic_opt.zero_grad()
+        crit_loss.backward()
+        self.critic_opt.step()
+        polyak_update(self.critic, self.ema_critic)
+
+        self.action_dist = self.actor.train_action(h.detach(), z.detach())
+        act_loss = self.actor_criterion(self.action_dist, action, self.returns, self.values, cont)
+
+        self.actor_opt.zero_grad()
+        act_loss.backward()
+        self.actor_opt.step()
+
+    def log_scalars(self):
+        with torch.no_grad():
+            actor_criterion_log = self.actor_criterion.log_dict()
+            critic_criterion_log = self.critic_criterion.log_dict()
+            return {**actor_criterion_log, **critic_criterion_log}
+
+    def log_distributions(self):
+        return {
+            'ac_rewards': self.rewards.detach().cpu(),
+            'ac_critic_mean': self.critic_dist.mean.detach().cpu(),
+            'ac_ema_critic_mean': self.ema_critic_dist.mean.detach().cpu(),
+            'ac_returns': self.returns.detach().cpu(),
+            'ac_values': self.values.detach().cpu(),
+            'ac_actions': self.action.detach().cpu(),
+            'ac_action_dist_mean': self.action_dist.mean.detach().cpu(),
+            'ac_cont': self.cont.detach().cpu()
+        }
 
 
 if __name__ == '__main__':
@@ -408,5 +472,3 @@ if __name__ == '__main__':
 
         torch.save(critic, 'critic.pt')
         torch.save(actor.state_dict(), 'actor.pt')
-
-

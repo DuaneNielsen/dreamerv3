@@ -1,18 +1,16 @@
 import gymnasium
-from gymnasium.core import WrapperActType, ActType, ObsType, WrapperObsType
-from gymnasium.spaces import Box
 from envs.simpler_gridworld import PartialRGBObservationWrapper
 
 import replay
+from envs.wrappers import OneHotActionWrapper, MaxCombineObservations
 from replay import BatchLoader, Step
 from collections import deque
 from torchvision.transforms.functional import to_tensor
 from rssm import make_small, RSSMLoss
-from actor_critic import score, CriticLoss, ActorLoss, traj_weight, polyak_update, Actor, Critic
+from actor_critic import Actor, Critic, ActorCriticTrainer
 import torch
 from torch.optim import Adam
 from argparse import ArgumentParser
-import copy
 import utils
 import wandb
 from utils import register_gradient_clamp
@@ -21,8 +19,6 @@ from wandb.data_types import Video
 import viz
 import envs.gridworld as gridworld
 import numpy as np
-from copy import deepcopy
-from time import time
 
 
 def rollout(env, actor, rssm, pad_action):
@@ -84,74 +80,6 @@ def train_world_model(buff, rssm, rssm_opt, rssm_criterion, step=None):
                 }, step=step)
 
 
-class ActorCriticTrainer:
-    def __init__(self, actor, critic, lr, adam_eps, grad_clip, device):
-        self.actor_criterion = ActorLoss()
-        self.critic_criterion = CriticLoss()
-        self.actor = actor.to(device)
-        self.critic = critic.to(device)
-        self.ema_critic = deepcopy(critic).to(device)
-        self.critic_opt = Adam(critic.parameters(), lr=lr, eps=adam_eps)
-        self.actor_opt = Adam(actor.parameters(), lr=lr, eps=adam_eps)
-        register_gradient_clamp(critic, grad_clip)
-        register_gradient_clamp(actor, grad_clip)
-
-    def train(self, h, z, action, rewards, cont):
-        self.h = h
-        self.z = z
-        self.action = action
-        self.rewards = rewards
-        self.cont = cont
-
-        with torch.no_grad():
-            critic_dist = self.critic(h.detach(), z.detach())
-            self.returns, self.values = score(rewards, cont, critic_dist.mean.unsqueeze(-1))
-            tw = traj_weight(cont)
-
-        self.critic_dist = critic(h.detach()[:-1], z.detach()[:-1])
-        self.ema_critic_dist = self.ema_critic(h.detach()[:-1], z.detach()[:-1])
-        crit_loss = self.critic_criterion(self.returns, self.critic_dist, self.ema_critic_dist, tw[:-1])
-
-        self.critic_opt.zero_grad()
-        crit_loss.backward()
-        self.critic_opt.step()
-        polyak_update(self.critic, self.ema_critic)
-
-        self.action_dist = actor.train_action(h.detach(), z.detach())
-        act_loss = self.actor_criterion(self.action_dist, action, self.returns, self.values, cont)
-
-        self.actor_opt.zero_grad()
-        act_loss.backward()
-        self.actor_opt.step()
-
-    def state_dicts(self):
-        self.actor.state_dict(), self.actor_opt.state_dict(), self.critic.state_dict(), self.critic_opt.state_dict()
-
-    def load_state_dicts(self, actor_state_dict, actor_opt_state_dict, critic_state_dict, critic_opt_state_dict):
-        self.actor.load_state_dict(actor_state_dict)
-        self.actor_opt.load_state_dict(actor_opt_state_dict)
-        self.critic.load_state_dict(critic_state_dict)
-        self.critic_opt.load_state_dict(critic_opt_state_dict)
-
-    def log_scalars(self):
-        with torch.no_grad():
-            actor_criterion_log = self.actor_criterion.log_dict()
-            critic_criterion_log = self.critic_criterion.log_dict()
-            return {**actor_criterion_log, **critic_criterion_log}
-
-    def log_distributions(self):
-        return {
-            'ac_rewards': self.rewards.detach().cpu(),
-            'ac_critic_mean': self.critic_dist.mean.detach().cpu(),
-            'ac_ema_critic_mean': self.ema_critic_dist.mean.detach().cpu(),
-            'ac_returns': self.returns.detach().cpu(),
-            'ac_values': self.values.detach().cpu(),
-            'ac_actions': self.action.detach().cpu(),
-            'ac_action_dist_mean': self.action_dist.mean.detach().cpu(),
-            'ac_cont': self.cont.detach().cpu()
-        }
-
-
 if __name__ == '__main__':
 
     parser = ArgumentParser()
@@ -179,28 +107,8 @@ if __name__ == '__main__':
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     wandb.init(project=f"dreamerv3-{args.env.replace('/', '-')}")
+    run_dir = utils.next_run()
     wandb.config.update(args)
-
-
-    class OneHotActionWrapper(gymnasium.ActionWrapper):
-
-        def __init__(self, env):
-            super().__init__(env)
-
-        def action(self, action: WrapperActType) -> ActType:
-            return action.argmax(-1).item()
-
-
-    class MaxCombineObservations(gymnasium.ObservationWrapper):
-
-        def __init__(self, env):
-            super().__init__(env)
-            obs_shape = self.observation_space.shape[1:]
-            self.observation_space = Box(low=0, high=255, shape=obs_shape, dtype=np.uint8)
-
-        def observation(self, observation: ObsType) -> WrapperObsType:
-            return np.maximum(observation[0], observation[1])
-
 
     if 'ALE' in args.env:
         env = gymnasium.make(args.env)
@@ -243,10 +151,13 @@ if __name__ == '__main__':
     for i in range(400):
         buff += [next(gen)]
 
-    # if args.resume:
-    #     rssm, rssm_optim, critic, critic_optim, actor, actor_optim, steps, resume_args = \
-    #         utils.load(args.resume, rssm, rssm_opt, critic, critic_opt, actor, actor_opt)
-    #     print(f'resuming from step {steps} of {args.resume} with {resume_args}')
+    if args.resume:
+        checkpoint = torch.load(args.resume)
+        rssm.load_state_dict(checkpoint['rssm_state_dict'])
+        rssm_opt.load_state_dict(checkpoint['rssm_opt_state_dict'])
+        actor_critic_trainer.load_state_dict(checkpoint['actor_critic_state_dict'])
+        step, run_args = checkpoint['step'], checkpoint['args']
+        print(f'resuming from step {step} of {args.resume} with {run_args}')
 
     loader = BatchLoader(device=args.device, observation_transform=replay.transform_rgb_image)
 
@@ -260,16 +171,10 @@ if __name__ == '__main__':
         imag_h, imag_z, imag_action, imag_rewards, imag_cont = \
             rssm.imagine(h0, obs[0], reward[0], cont[0], actor, imagination_horizon=args.imagination_horizon)
 
-        actor_critic_trainer.train(imag_h, imag_z, imag_action, imag_rewards, imag_cont)
+        actor_critic_trainer.train_step(imag_h, imag_z, imag_action, imag_rewards, imag_cont)
 
         wandb.log(actor_critic_trainer.log_scalars(), step=step)
         wandb.log({k: wandb.Histogram(v) for k, v in actor_critic_trainer.log_distributions().items()}, step=step)
-
-        # if step % args.log_every_n_steps == 0:
-        # actor, actor_opt, critic, critic_opt = actor_critic_trainer.state_dicts()
-        # utils.save(utils.run.rundir, rssm, rssm_opt, critic, critic_opt, actor,
-        #            actor_opt, args, step)
-        # print(f'saved model at step {step}')
 
         if buff[-1].is_terminal:
             latest_trajectory = replay.get_tail_trajectory(buff)
@@ -286,12 +191,21 @@ if __name__ == '__main__':
 
             print(f'trajectory end: reward {trajectory_reward} len: {len(latest_trajectory)}')
 
-
         if step % args.log_every_n_steps == 0:
+
             imag_obs = rssm.decoder(imag_h, imag_z).mean
             imag_returns = actor_critic_trainer.log_distributions()['ac_returns'].to(args.device)
             imagined_trajectory_viz = viz.visualize_imagined_trajectory(
                 imag_obs[:-1, :], imag_action[:-1, :], imag_rewards[:-1, :], imag_cont[:-1, :],
                 imag_returns[:, :], action_table=action_table)
+
             imagined_trajectory_viz = (imagined_trajectory_viz * 255).to(dtype=torch.uint8).cpu().numpy()
             wandb.log({'ac_imagined_trajectory': wandb.Video(imagined_trajectory_viz)}, step=step)
+
+            torch.save({
+                'args': args,
+                'step': step,
+                'actor_critic_trainer_state_dict': actor_critic_trainer.state_dict(),
+                'rssm_state_dict': rssm.state_dict(),
+                'rssm_opt_state_dict': rssm_opt.state_dict()
+            }, run_dir + '/checkpoint.pt')
