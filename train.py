@@ -155,7 +155,7 @@ if __name__ == '__main__':
         checkpoint = torch.load(args.resume)
         rssm.load_state_dict(checkpoint['rssm_state_dict'])
         rssm_opt.load_state_dict(checkpoint['rssm_opt_state_dict'])
-        actor_critic_trainer.load_state_dict(checkpoint['actor_critic_state_dict'])
+        actor_critic_trainer.load_state_dict(checkpoint['actor_critic_trainer_state_dict'])
         step, run_args = checkpoint['step'], checkpoint['args']
         print(f'resuming from step {step} of {args.resume} with {run_args}')
 
