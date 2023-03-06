@@ -5,7 +5,7 @@ import numpy as np
 
 
 class Step:
-    def __init__(self, observation, action, reward=0., terminated=False, truncated=False):
+    def __init__(self, observation, action, reward=0., terminated=None, truncated=None, cont=None, **kwargs):
         """
 
         :param observation:
@@ -17,9 +17,14 @@ class Step:
         self.observation = observation
         self.action = action
         self.reward = np.array([reward], dtype=np.float32)
-        self.cont = np.logical_not(np.array([terminated])) * 1.
+        assert (terminated is None) != (cont is None), 'must specify terminated or cont but not both'
+        if terminated is not None:
+            self.cont = np.logical_not(np.array([terminated])) * 1.
+        else:
+            self.cont = cont
         self.terminated = terminated
         self.truncated = truncated
+        self.info = kwargs
 
     def as_tuple(self):
         return self.observation, self.action, self.reward, self.cont
@@ -145,6 +150,26 @@ def total_reward(trajectory):
     return t_reward[0]
 
 
+def unroll(tensor):
+    return [trajectory.aslist() for trajectory in tensor.unbind(1)]
+
+
+def unstack_batch(observation, action, reward, cont, inverse_obs_transform=None, **kwargs):
+    T, N = observation.shape[0:2]
+    if inverse_obs_transform is not None:
+        observation = inverse_obs_transform(observation)
+    buff = []
+    for n in range(N):
+        for t in range(T):
+            obs_step = observation[t, n].detach().cpu().numpy()
+            action_step = action[t, n].detach().cpu().numpy()
+            reward_step = reward[t, n].detach().cpu().numpy()
+            cont_step = cont[t, n].detach().cpu().numpy()
+            arg_step = {arg: kwargs[arg][t, n].detach().cpu().numpy() for arg in kwargs}
+            buff += [Step(obs_step, action_step, reward_step, cont=cont_step, **arg_step)]
+    return buff
+
+
 if __name__ == '__main__':
 
     buff = deque()
@@ -187,3 +212,7 @@ if __name__ == '__main__':
     observation, action, reward, cont = loader.sample(buff, 2, 10)
 
     total_reward(trajectory_1)
+    values = torch.zeros_like(reward)
+    buff = unstack_batch(observation, action, reward, cont, values=values)
+
+    print(buff)
