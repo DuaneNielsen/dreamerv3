@@ -29,7 +29,7 @@ def rollout(env, actor, rssm, pad_action):
     reward, terminated, truncated = 0.0, False, False
 
     while True:
-        action = actor.sample_action(h, z)
+        action = actor(h, z).sample()
         yield Step(obs, action[0].detach().cpu().numpy(), reward, terminated, truncated)
 
         obs, reward, terminated, truncated, info = env.step(action[0].cpu())
@@ -102,11 +102,14 @@ if __name__ == '__main__':
     parser.add_argument('--env_action_size', type=int, default=1)
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--decoder', type=str, default=None)
+    parser.add_argument('--dev', action='store_true')
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    wandb.init(project=f"dreamerv3-{args.env.replace('/', '-')}")
+    project_name = f"dreamerv3-{args.env.replace('/', '-')}"
+    project_name = project_name + '-dev' if args.dev else project_name
+    wandb.init(project=project_name)
     run_dir = utils.next_run()
     wandb.config.update(args)
 
@@ -166,8 +169,9 @@ if __name__ == '__main__':
         buff += [next(gen)]
         train_world_model(buff, rssm, rssm_opt, rssm_criterion, step)
 
-        obs, act, reward, cont = loader.sample(buff, batch_length=1, batch_size=args.batch_size)
-        h0 = rssm.new_hidden0(args.batch_size)
+        imag_batch_size = int(args.train_ratio / args.imagination_horizon)
+        obs, act, reward, cont = loader.sample(buff, batch_length=1, batch_size=imag_batch_size)
+        h0 = rssm.new_hidden0(imag_batch_size)
         imag_h, imag_z, imag_action, imag_rewards, imag_cont = \
             rssm.imagine(h0, obs[0], reward[0], cont[0], actor, imagination_horizon=args.imagination_horizon)
 
@@ -178,10 +182,11 @@ if __name__ == '__main__':
 
         if buff[-1].is_terminal:
             latest_trajectory = replay.get_tail_trajectory(buff)
+
             trajectory_reward = replay.total_reward(latest_trajectory)
-            trajectory_viz = viz.visualize_trajectory(latest_trajectory, action_table=action_table)
-            trajectory_viz = (trajectory_viz * 255).to(dtype=torch.uint8).numpy()
+            trajectory_viz = viz.visualize_buff(latest_trajectory, action_meanings=action_table)
             dec_trajectory = viz.decode_trajectory(rssm, latest_trajectory)
+
             wandb.log({
                 'trajectory_reward': trajectory_reward,
                 'trajectory_length': len(latest_trajectory),

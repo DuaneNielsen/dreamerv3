@@ -10,6 +10,7 @@ from copy import deepcopy
 import cv2
 from uuid import uuid4
 from numpy.linalg import norm
+from numpy.random import randint
 
 yellow = (0, 255, 255)
 red = (0, 0, 255)
@@ -25,12 +26,23 @@ class Ghost:
         self.counter = 0
         self.mode = 'chase'
         self.id = uuid4()
+        self.effects = {}
 
     def reset(self):
         self.pos = deepcopy(self.start_pos)
         self.prev_reverse_action = None
         self.counter = 0
         self.mode = 'scatter'
+
+    def tick_status(self):
+        expired = []
+        for effect in self.effects:
+            self.effects[effect] -= 1
+            if self.effects[effect] == 0:
+                expired += [effect]
+        for effect in expired:
+            del self.effects[effect]
+        return expired
 
     def get_target(self, mode, env):
         if mode == 'chase':
@@ -42,14 +54,16 @@ class Ghost:
         now_tile = env.grid[self.pos[0]][self.pos[1]]
         choices = [env.lookahead(self.pos, action) for action in range(env.action_space.n.item())]
 
-        if self.counter < 70:
-            self.mode = 'scatter'
-        else:
-            self.mode = 'chase'
+        if 'frightened' in self.effects:
+            if self.counter < 70:
+                self.mode = 'scatter'
+            else:
+                self.mode = 'chase'
 
         target = self.get_target(self.mode, env)
 
         preferred_choice = []
+
         for (tile, pos), action in zip(choices, range(env.action_space.n.item())):
             if tile.traversable:
                 d = norm(target - pos)
@@ -61,13 +75,20 @@ class Ghost:
             if preferred_choice[0][0] == self.prev_reverse_action:
                 preferred_choice = [preferred_choice[1]]
 
-        selected_action, _, selected_pos, selected_tile = preferred_choice[0]
+        if 'frightened' in self.effects and len(preferred_choice) > 2:
+            randdir = randint(0, len(preferred_choice))
+            selected_action, _, selected_pos, selected_tile = preferred_choice[randdir]
+        else:
+            selected_action, _, selected_pos, selected_tile = preferred_choice[0]
+
         self.pos = selected_pos
         self.prev_reverse_action = reverse_action(selected_action)
         del now_tile.monster_stack[self.id]
         selected_tile.monster_stack[self.id] = self
-        self.counter += 1
-        self.counter = self.counter % 270
+
+        if 'frightened' in self.effects:
+            self.counter += 1
+            self.counter = self.counter % 270
 
 
 class Blinky(Ghost):
@@ -128,6 +149,9 @@ class Item:
     def effect(self, env):
         pass
 
+    def effect_ghost(self, ghost):
+        pass
+
 
 class PowerPill(Item):
     def __init__(self, color, reward):
@@ -135,6 +159,9 @@ class PowerPill(Item):
 
     def effect(self, env):
         env.energised = 30
+
+    def effect_ghost(self, ghost):
+        ghost.effects['frightened'] = 30
 
 
 class Tile:
@@ -215,6 +242,8 @@ class SimplerGridWorld(gymnasium.Env):
         now_tile = self.grid[self.pos[0]][self.pos[1]]
         if now_tile.has_item:
             now_tile.stack[-1].effect(self)
+            for ghost in self.monsters.values():
+                now_tile.stack[-1].effect_ghost(ghost)
             now_tile.stack.pop()
 
         if self.energised > 0:
@@ -434,7 +463,7 @@ worlds = {
         'wwwwdwdwwwwwdwdwwww',
         'wddddddddwddddddddw',
         'wdwwdwwwdwdwwwdwwdw',
-        'wzdwdddddsdddddwdzw',
+        'wzdwddddzszddddwdzw',
         'wwdwdwdwwwwwdwdwdww',
         'wddddwdddwdddwddddw',
         'wdwwwwwwdwdwwwwwwdw',

@@ -27,7 +27,8 @@
 import torch
 import torch.nn as nn
 from torch.distributions import Normal, Bernoulli, OneHotCategorical
-from dists import OneHotCategoricalStraightThru, categorical_kl_divergence_clamped, TwoHotSymlog, OneHotCategoricalUnimix
+from dists import OneHotCategoricalStraightThru, categorical_kl_divergence_clamped, TwoHotSymlog, \
+    OneHotCategoricalUnimix
 from blocks import MLPBlock, ModernDecoderConvBlock, Embedder, DecoderConvBlock
 
 
@@ -54,10 +55,10 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, out_channels=3, cnn_multi=32, mlp_layers=2, mlp_hidden=512, h_size=512):
+    def __init__(self, out_channels=3, cnn_multi=32, mlp_layers=2, mlp_hidden=512, h_size=512, z_size=32, z_cls=32):
         super().__init__()
         self.decoder = nn.Sequential(
-            nn.Linear(32 * 32 + h_size, mlp_hidden, bias=False),
+            nn.Linear(z_cls * z_size + h_size, mlp_hidden, bias=False),
             *[MLPBlock(mlp_hidden, mlp_hidden) for _ in range(mlp_layers)],
             nn.Linear(mlp_hidden, 4 * 4 * cnn_multi * 2 ** 3, bias=False),
             nn.Unflatten(-1, (cnn_multi * 2 ** 3, 4, 4)),
@@ -81,10 +82,10 @@ class Decoder(nn.Module):
 
 
 class ModernDecoder(nn.Module):
-    def __init__(self, out_channels=3, cnn_multi=32, mlp_layers=2, mlp_hidden=512, h_size=512):
+    def __init__(self, out_channels=3, cnn_multi=32, mlp_layers=2, mlp_hidden=512, h_size=512, z_size=32, z_cls=32):
         super().__init__()
         self.decoder = nn.Sequential(
-            nn.Linear(32 * 32 + h_size, mlp_hidden, bias=False),
+            nn.Linear(z_cls * z_size + h_size, mlp_hidden, bias=False),
             *[MLPBlock(mlp_hidden, mlp_hidden) for _ in range(mlp_layers - 1)],
             MLPBlock(mlp_hidden, 4 * 4 * cnn_multi * 2 ** 3),
             nn.Unflatten(-1, (cnn_multi * 2 ** 3, 4, 4)),
@@ -124,33 +125,35 @@ class DynamicsPredictor(nn.Module):
 
 
 class RewardPredictor(nn.Module):
-    def __init__(self, h_size=512, mlp_size=512, mlp_layers=2):
+    def __init__(self, h_size=512, z_size=32, z_cls=32, mlp_size=512, mlp_layers=2):
         super().__init__()
 
         self.output = nn.Linear(mlp_size, 256, bias=False)
         self.output.weight.data.zero_()
 
         self.reward_predictor = nn.Sequential(
-            MLPBlock(h_size, mlp_size),
+            MLPBlock(z_cls * z_size + h_size, mlp_size),
             *[MLPBlock(mlp_size, mlp_size) for _ in range(mlp_layers - 1)],
             self.output
         )
 
-    def forward(self, h):
-        return TwoHotSymlog(self.reward_predictor(h))
+    def forward(self, h, z):
+        hz_flat = torch.cat([h, z.flatten(-2)], dim=-1)
+        return TwoHotSymlog(self.reward_predictor(hz_flat))
 
 
 class ContinuePredictor(nn.Module):
-    def __init__(self,  h_size=512, mlp_size=512, mlp_layers=2):
+    def __init__(self, h_size=512, z_size=32, z_cls=32, mlp_size=512, mlp_layers=2):
         super().__init__()
         self.continue_predictor = nn.Sequential(
-            MLPBlock(h_size, mlp_size),
+            MLPBlock(z_cls * z_size + h_size, mlp_size),
             *[MLPBlock(mlp_size, mlp_size) for _ in range(mlp_layers - 1)],
             nn.Linear(mlp_size, 1, bias=False)
         )
 
-    def forward(self, h):
-        return Bernoulli(logits=self.continue_predictor(h))
+    def forward(self, h, z):
+        hz_flat = torch.cat([h, z.flatten(-2)], dim=-1)
+        return Bernoulli(logits=self.continue_predictor(hz_flat))
 
 
 class SequenceModel(nn.Module):
@@ -164,7 +167,8 @@ class SequenceModel(nn.Module):
 
 
 class RSSM(nn.Module):
-    def __init__(self, sequence_model, embedder, encoder, decoder, dynamics_pred, reward_pred, continue_pred, h_size=512):
+    def __init__(self, sequence_model, embedder, encoder, decoder, dynamics_pred, reward_pred, continue_pred,
+                 h_size=512):
         super().__init__()
         """
          Sequence Model:       h = f( h, z, a )
@@ -245,8 +249,8 @@ class RSSM(nn.Module):
 
         x_dist = self.decoder(h, z)
         z_post_logits = self.dynamics_pred(h)
-        reward_probs = self.reward_pred(h)
-        continue_dist = self.continue_pred(h)
+        reward_probs = self.reward_pred(h, z)
+        continue_dist = self.continue_pred(h, z)
 
         return x_dist, reward_probs, continue_dist, z_prior_logits, z_post_logits
 
@@ -296,8 +300,8 @@ class RSSM(nn.Module):
 
         h = self.seq_model(z, a, h)
         z_imagine = OneHotCategoricalUnimix(logits=self.dynamics_pred(h)).sample()
-        reward = self.reward_pred(h).mean.unsqueeze(-1)
-        cont = self.continue_pred(h).probs
+        reward = self.reward_pred(h, z_imagine).mean.unsqueeze(-1)
+        cont = self.continue_pred(h, z_imagine).probs
         return h, z_imagine, reward, cont
 
     def step_imagine(self, h, z, a):
@@ -331,13 +335,13 @@ class RSSM(nn.Module):
         """
 
         z = self.encode_observation(h0, obs).sample()
-        a = policy.sample_action(h0, z)
+        a = policy(h0, z).sample()
 
         h_list, z_list, a_list, reward_enc_list, cont_list = [h0], [z], [a], [reward], [cont]
 
         for t in range(imagination_horizon):
             h, z = self.step_imagine(h_list[-1], z_list[-1], a_list[-1])
-            a = policy.sample_action(h, z)
+            a = policy(h, z).sample()
 
             h_list += [h]
             z_list += [z]
@@ -347,8 +351,8 @@ class RSSM(nn.Module):
         z = torch.stack(z_list)
         a = torch.stack(a_list)
 
-        reward = self.reward_pred(h).mean.unsqueeze(-1)
-        cont = self.continue_pred(h).probs
+        reward = self.reward_pred(h, z).mean.unsqueeze(-1)
+        cont = self.continue_pred(h, z).probs
 
         return h.detach(), z.detach(), a.detach(), reward.detach(), cont.detach()
 
@@ -363,25 +367,23 @@ class RSSMLoss:
         self.loss = None
 
     def __call__(self, obs, rewards, cont, obs_dist, reward_dist, cont_dist, z_prior_logits, z_post_logits):
-        self.loss_obs = - obs_dist.log_prob(obs).flatten(start_dim=2)
+        self.loss_obs = - obs_dist.log_prob(obs).flatten(start_dim=2).mean(-1)
         self.loss_reward = - reward_dist.log_prob(rewards.squeeze(-1))
-        self.loss_cont = - cont_dist.log_prob(cont)
-        self.loss_dyn = 0.5 * categorical_kl_divergence_clamped(z_prior_logits.detach(), z_post_logits)
-        self.loss_rep = 0.1 * categorical_kl_divergence_clamped(z_prior_logits, z_post_logits.detach())
-        self.loss_obs = self.loss_obs.mean()
-        self.loss_reward = self.loss_reward.mean()
-        self.loss_cont = self.loss_cont.mean()
-        self.loss_dyn = self.loss_dyn.mean()
-        self.loss_rep = self.loss_rep.mean()
+        self.loss_cont = - cont_dist.log_prob(cont).squeeze(-1)
+        self.loss_dyn = 0.5 * categorical_kl_divergence_clamped(z_prior_logits.detach(), z_post_logits).mean(-1)
+        self.loss_rep = 0.1 * categorical_kl_divergence_clamped(z_prior_logits, z_post_logits.detach()).mean(-1)
         self.loss = self.loss_obs + self.loss_reward + self.loss_cont + self.loss_dyn + self.loss_rep
+        self.loss = self.loss.mean()
         return self.loss
 
     def loss_dict(self):
         return {
             'wm_loss': self.loss.item(),
-            'wm_loss_pred': self.loss_obs.item() + self.loss_reward.item() + self.loss_cont.item(),
-            'wm_loss_dyn': self.loss_dyn.item(),
-            'wm_loss_rep': self.loss_rep.item()
+            'wm_loss_obs': self.loss_obs.mean().item(),
+            'wm_loss_reward': self.loss_reward.mean().item(),
+            'wm_loss_cont': self.loss_cont.mean().item(),
+            'wm_loss_dyn': self.loss_dyn.mean().item(),
+            'wm_loss_rep': self.loss_rep.mean().item()
         }
 
 
@@ -436,7 +438,6 @@ if __name__ == '__main__':
 
         class ImaginedEnv:
             def __init__(self):
-
                 self.h = None
                 self.z = None
 
@@ -453,6 +454,7 @@ if __name__ == '__main__':
                 obs = rssm.decoder(self.h, self.z).mean
                 return obs, r, c
 
+
         def press_button(action):
             action = one_hot(torch.tensor([[action]]), args.action_classes)
             obs, r, c = env.step(action)
@@ -460,14 +462,18 @@ if __name__ == '__main__':
             fig.canvas.draw()
             fig.canvas.flush_events()
 
+
         def press_zero(event):
             press_button(0)
+
 
         def press_one(event):
             press_button(1)
 
+
         def press_two(event):
             press_button(2)
+
 
         def press_three(event):
             press_button(3)
@@ -496,6 +502,5 @@ if __name__ == '__main__':
         axthree = fig.add_axes([0.5, 0.05, 0.1, 0.075])
         bthree = Button(axthree, '3')
         bthree.on_clicked(press_three)
-
 
         plt.show()

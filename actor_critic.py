@@ -41,19 +41,20 @@ class Actor(nn.Module):
     def forward(self, h, z):
         h_z_flat = torch.cat((h, z.flatten(-2)), dim=-1)
         action_flat = self.critic(h_z_flat)
-        return action_flat.unflatten(-1, (self.action_size, self.action_classes))
+        action_logits = action_flat.unflatten(-1, (self.action_size, self.action_classes))
+        return OneHotCategoricalStraightThru(logits=action_logits)
 
-    def train_action(self, h, z):
-        logits = self(h, z)
-        return OneHotCategoricalUnimix(logits=logits)
+    # def train_action(self, h, z):
+    #     logits = self(h, z)
+    #     return OneHotCategoricalUnimix(logits=logits)
 
-    def sample_action(self, h, z):
-        action_logits = self.forward(h, z)
-        return OneHotCategoricalStraightThru(logits=action_logits).sample()
+    # def sample_action(self, h, z):
+    #     action_logits = self.forward(h, z)
+    #     return OneHotCategoricalStraightThru(logits=action_logits).sample()
 
-    def exploit_action(self, h, z):
-        action_logits = self.forward(h, z)
-        return OneHotCategorical(logits=action_logits).mode
+    # def exploit_action(self, h, z):
+    #     action_logits = self.forward(h, z)
+    #     return OneHotCategorical(logits=action_logits).mode
 
 
 def score(reward, cont, value, discount=0.997, lamb_da=0.95):
@@ -232,7 +233,7 @@ class ActorCriticTrainer(nn.Module):
         self.critic_opt.step()
         polyak_update(self.critic, self.ema_critic)
 
-        self.action_dist = self.actor.train_action(h.detach(), z.detach())
+        self.action_dist = self.actor(h.detach(), z.detach())
         act_loss = self.actor_criterion(self.action_dist, action, self.returns, self.values, cont)
 
         self.actor_opt.zero_grad()

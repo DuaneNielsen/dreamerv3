@@ -190,6 +190,52 @@ def make_trajectory_panel(trajectory, action_table=None):
     return make_grid(panel)
 
 
+def visualize_step(step, action_meanings=None, info_keys=None):
+
+    if action_meanings is not None:
+        action_caption = f'{action_meanings[step.action.argmax().item()]}'
+    else:
+        action_caption = f'action: {step.action.argmax().item()}'
+
+    reward_caption = f'rew: {step.reward.item():.2f}'
+    if - 0.1 < step.reward < 0.1:
+        reward_color = (255, 255, 255, 255)
+    elif step.reward < -0.1:
+        reward_color = (255, 0, 0, 255)
+    elif step.reward > 0.1:
+        reward_color = (0, 255, 0, 255)
+    else:
+        reward_color = (255, 255, 0, 255)
+
+    cont_caption = f'con: {step.cont.item():.2f}'
+    cont_color = (floor(255 * (1 - step.cont.item())), 180, floor(255 * step.cont.item()), 255)
+
+    caption_below_list = [(reward_caption, reward_color), (cont_caption, cont_color)]
+
+    if info_keys is not None:
+        for key in info_keys:
+            if key in step.info:
+                caption_below_list += [(step.info[key])]
+            else:
+                raise Exception(f'key {key} was not found in step')
+
+    captioned_obs = add_caption_to_observation(
+        caption_above_list=[(action_caption,)],
+        obs=step.observation,
+        caption_below_list=caption_below_list
+    )
+
+    return captioned_obs.transpose((2, 0, 1))
+
+
+def filter(filter, *tensors):
+    return tuple([tensor[filter] for tensor in tensors])
+
+
+def visualize_buff(buff, action_meanings=None):
+    return np.stack([visualize_step(step, action_meanings) for step in buff])
+
+
 def make_panel(obs, action, reward, cont, value=None, filter_mask=None, action_table=None, nrow=8):
     """
     obs: observations [..., C, H, W]
