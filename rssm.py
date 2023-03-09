@@ -317,7 +317,7 @@ class RSSM(nn.Module):
         """
 
         h = self.seq_model(z, a, h)
-        z_imagine = OneHotCategoricalUnimix(logits=self.dynamics_pred(h)).sample()
+        z_imagine = OneHotCategoricalStraightThru(logits=self.dynamics_pred(h)).sample()
         return h, z_imagine
 
     def imagine(self, h0, obs, reward, cont, policy, imagination_horizon=15):

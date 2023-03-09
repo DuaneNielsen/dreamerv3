@@ -1,8 +1,8 @@
 import gymnasium
-from envs.simpler_gridworld import PartialRGBObservationWrapper
+from gridworlds.simpler_gridworld import PartialRGBObservationWrapper
 
 import replay
-from envs.wrappers import OneHotActionWrapper, MaxCombineObservations
+from gridworlds.wrappers import OneHotActionWrapper, MaxCombineObservations
 from replay import BatchLoader, Step
 from collections import deque
 from torchvision.transforms.functional import to_tensor
@@ -14,11 +14,12 @@ from argparse import ArgumentParser
 import utils
 import wandb
 from utils import register_gradient_clamp
-from viz import make_batch_panels
+from viz import visualize_buff, visualize_step
 from wandb.data_types import Video
 import viz
-import envs.gridworld as gridworld
+import gridworlds.gridworld as gridworld
 import numpy as np
+from torchvision.utils import make_grid
 
 
 def rollout(env, actor, rssm, pad_action):
@@ -62,10 +63,31 @@ def train_world_model(buff, rssm, rssm_opt, rssm_criterion, step=None):
 
         if step % args.log_every_n_steps == 0:
             with torch.no_grad():
-                batch_panel, rewards_panel, terminal_panel = \
-                    make_batch_panels(obs, action, reward, cont, obs_dist.mean,
-                                      reward_dist.mean.unsqueeze(-1), cont_dist.probs,
-                                      action_table=action_table)
+                viz_batch_gt_buff = replay.unstack_batch(obs[0:8, 0:8], action[0:8, 0:8], reward[0:8, 0:8],
+                                                         cont[0:8, 0:8])
+                viz_batch_pred_buff = replay.unstack_batch(obs_dist.mean[0:8, 0:8], action[0:8, 0:8],
+                                                           reward_dist.mean[0:8, 0:8], cont_dist.mean[0:8, 0:8])
+                viz_batch_gt = visualize_buff(viz_batch_gt_buff, action_meanings=action_table)
+                viz_batch_pred = visualize_buff(viz_batch_pred_buff, action_meanings=action_table)
+                batch_panel = torch.cat(
+                    (make_grid(torch.from_numpy(viz_batch_gt)), make_grid(torch.from_numpy(viz_batch_pred))),
+                    dim=2).numpy().transpose(1, 2, 0)
+
+                viz_gt_buff = replay.unstack_batch(obs, action, reward, cont)
+                viz_pred_buff = replay.unstack_batch(obs_dist.mean, action, reward_dist.mean, cont_dist.mean)
+
+                def side_by_side(left_buff, right_buff, filter_lam):
+                    side_by_side = []
+                    for gt, pred in zip(left_buff, right_buff):
+                        if filter_lam(gt) or filter_lam(pred):
+                            side_by_side += [np.concatenate((visualize_step(gt), visualize_step(pred)), axis=1)]
+                    if len(side_by_side) == 0:
+                        return np.zeros((64, 64, 3), dtype=np.uint8)
+                    side_by_side = np.stack(side_by_side)
+                    return make_grid(torch.from_numpy(side_by_side)).permute(1, 2, 0).numpy()
+
+                rewards_panel = side_by_side(viz_gt_buff, viz_pred_buff, lambda st: abs(st.reward) > 0.1)
+                terminal_panel = side_by_side(viz_gt_buff, viz_pred_buff, lambda st: st.cont > 0.1)
 
                 wandb.log({
                     'wm_batch_panel': wandb.Image(batch_panel),
@@ -114,7 +136,7 @@ if __name__ == '__main__':
     wandb.config.update(args)
 
     if 'ALE' in args.env:
-        env = gymnasium.make(args.env)
+        env = gymnasium.make(args.env, frameskip=4)
         env = OneHotActionWrapper(env)
         env = gymnasium.wrappers.FrameStack(env, 2)
         env = MaxCombineObservations(env)
@@ -162,7 +184,7 @@ if __name__ == '__main__':
         step, run_args = checkpoint['step'], checkpoint['args']
         print(f'resuming from step {step} of {args.resume} with {run_args}')
 
-    loader = BatchLoader(device=args.device, observation_transform=replay.transform_rgb_image)
+    loader = BatchLoader(device=args.device, observation_transform=replay.symlog_rgb_image)
 
     for step in range(args.max_steps):
 
@@ -184,27 +206,27 @@ if __name__ == '__main__':
             latest_trajectory = replay.get_tail_trajectory(buff)
 
             trajectory_reward = replay.total_reward(latest_trajectory)
-            trajectory_viz = viz.visualize_buff(latest_trajectory, action_meanings=action_table)
-            dec_trajectory = viz.decode_trajectory(rssm, latest_trajectory)
+            trajectory_viz = viz.visualize_buff(latest_trajectory, action_meanings=action_table, image_hw=(128, 64))
+            dec_trajectory = viz.decode_trajectory(rssm, latest_trajectory, critic)
+            dec_buff = replay.unstack_batch(*dec_trajectory[0:-1], value=dec_trajectory[-1])
+            dec_trajectory_viz = viz.visualize_buff(dec_buff, action_meanings=action_table, info_keys=['value'])
+            side_by_side = np.concatenate((trajectory_viz, dec_trajectory_viz), axis=3)
 
             wandb.log({
                 'trajectory_reward': trajectory_reward,
                 'trajectory_length': len(latest_trajectory),
-                'trajectory_viz': Video(trajectory_viz),
-                'trajectory_dec': Video(dec_trajectory)
+                'trajectory_viz': Video(side_by_side)
             }, step=step)
 
             print(f'trajectory end: reward {trajectory_reward} len: {len(latest_trajectory)}')
 
         if step % args.log_every_n_steps == 0:
-
             imag_obs = rssm.decoder(imag_h, imag_z).mean
             imag_returns = actor_critic_trainer.log_distributions()['ac_returns'].to(args.device)
-            imagined_trajectory_viz = viz.visualize_imagined_trajectory(
+            imagined_trajectory_viz = viz.visualize_imagined_trajectories(
                 imag_obs[:-1, :], imag_action[:-1, :], imag_rewards[:-1, :], imag_cont[:-1, :],
-                imag_returns[:, :], action_table=action_table)
+                imag_returns[:, :], action_meanings=action_table)
 
-            imagined_trajectory_viz = (imagined_trajectory_viz * 255).to(dtype=torch.uint8).cpu().numpy()
             wandb.log({'ac_imagined_trajectory': wandb.Video(imagined_trajectory_viz)}, step=step)
 
             torch.save({

@@ -5,7 +5,7 @@ from torch.distributions import OneHotCategorical, Bernoulli, Normal
 from symlog import symexp
 from argparse import ArgumentParser
 from matplotlib import pyplot as plt
-from envs.env import Env
+from gridworlds.env import Env
 from replay import Step, sample_batch
 from collections import deque
 from rssm import RSSM, RSSMLoss

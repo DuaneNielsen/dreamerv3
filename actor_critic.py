@@ -1,12 +1,10 @@
-from copy import deepcopy
-
 import torch
 import torch.nn as nn
-from torch.distributions import OneHotCategorical
-from dists import TwoHotSymlog, OneHotCategoricalStraightThru, OneHotCategoricalUnimix
+from torch.optim import Adam
+from dists import TwoHotSymlog, OneHotCategoricalStraightThru
 from blocks import MLPBlock
 from utils import register_gradient_clamp
-from torch.optim import Adam
+from copy import deepcopy
 
 
 class Critic(nn.Module):
@@ -265,13 +263,11 @@ if __name__ == '__main__':
 
     from replay import Step
     import replay
-    from torch.optim import SGD, Adam
+    from torch.optim import Adam
     from torch import nn
-    from torch.nn.functional import one_hot
     from copy import deepcopy
     from torch.distributions import Categorical, Normal
     import gymnasium
-    import envs
     from statistics import mean, stdev
     import numpy as np
     from matplotlib import pyplot as plt

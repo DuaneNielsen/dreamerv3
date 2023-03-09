@@ -1,5 +1,5 @@
 from torch import nn as nn
-
+import symlog
 
 class MLPBlock(nn.Module):
     def __init__(self, in_features, out_features):

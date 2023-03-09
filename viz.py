@@ -6,9 +6,11 @@ from PIL import Image, ImageDraw, ImageFont
 from torch.nn.functional import conv1d
 from torchvision.transforms.functional import to_tensor
 from torchvision.utils import make_grid
+
+import replay
+import viz
 from replay import stack_trajectory
 from math import floor
-
 
 """
 https://matplotlib.org/stable/gallery/lines_bars_and_markers/scatter_hist.html#sphx-glr-gallery-lines-bars-and-markers-scatter-hist-py
@@ -99,105 +101,48 @@ class PlotImage:
             self.image.set_data(image)
 
 
-def make_caption(caption, color=(255, 255, 255, 255), width=64, height=16):
+def make_caption(caption, color=(255, 255, 255, 255), fontsize=8, width=64, height=16, anchor=None):
     img = Image.new('RGB', (width, height))
     draw = ImageDraw.Draw(img)
-    unicode_font = ImageFont.truetype("DejaVuSans.ttf", 8)
-    draw.text((1, 5), caption, fill=color, font=unicode_font)
+    unicode_font = ImageFont.truetype("DejaVuSans.ttf", fontsize)
+    draw.text((1, 5), caption, fill=color, font=unicode_font, anchor=anchor)
     return np.array(img)
 
 
-def add_caption_to_observation(caption_above_list, obs, caption_below_list):
-    top_captions = [make_caption(*caption) for caption in caption_above_list]
+def add_caption_to_observation(obs, caption_below_list):
     bottom_captions = [make_caption(*caption) for caption in caption_below_list]
-    top_captions = np.concatenate(top_captions, 0)
     bottom_captions = np.concatenate(bottom_captions, 0)
-    return np.concatenate([top_captions, obs, bottom_captions], 0)
+    return np.concatenate([obs, bottom_captions], 0)
 
 
-class CaptionedObsFactory:
-    def __init__(self, action_table=None):
-        """
-        An object that takes care of converting all the information in a
-        Step to an captioned image
-        :param action_table:
-        """
-        self.action_table = action_table
+def visualize_imagined_trajectories(obs_dec, action, rewards_dec, cont, value_preds, action_meanings):
+    T, N = obs_dec.shape[0:2]
+    imagine_buff = replay.unstack_batch(obs_dec, action, rewards_dec, cont, value=value_preds, return_type='list')
+    imagine_viz = []
+    for trajectory in imagine_buff:
+        imagine_viz += [viz.visualize_buff(trajectory, action_meanings=action_meanings)]
+    video = []
+    for t in range(T):
+        frame = [images[t] for images in imagine_viz]
+        frame = make_grid(make_grid(torch.from_numpy(np.stack(frame))))
+        video += [frame]
 
-    def __call__(self, obs, action, reward, cont, value=None):
-
-        if isinstance(obs, torch.Tensor):
-            obs = obs.detach().permute(1, 2, 0).cpu().numpy() * 255
-            obs = obs.astype(np.uint8)
-        if isinstance(action, torch.Tensor):
-            action = action.detach().cpu().numpy()
-        if isinstance(reward, torch.Tensor):
-            reward = reward.detach().cpu().numpy()
-        if isinstance(cont, torch.Tensor):
-            cont = cont.detach().cpu().numpy()
-        if isinstance(value, torch.Tensor):
-            value = value.detach().cpu().numpy()
-
-        if self.action_table is not None:
-            action_caption = f'{self.action_table[action.argmax().item()]}'
-        else:
-            action_caption = f'action: {action.argmax().item()}'
-
-        reward_caption = f'rew: {reward.item():.2f}'
-        if - 0.1 < reward < 0.1:
-            reward_color = (255, 255, 255, 255)
-        elif reward < -0.1:
-            reward_color = (255, 0, 0, 255)
-        elif reward > 0.1:
-            reward_color = (0, 255, 0, 255)
-        else:
-            reward_color = (255, 255, 0, 255)
-
-        cont_caption = f'con: {cont.item():.2f}'
-        cont_color = (floor(255 * (1-cont.item())), 180, floor(255 * cont.item()), 255)
-
-        caption_below_list = [(reward_caption, reward_color), (cont_caption, cont_color)]
-
-        if value is not None:
-            value_caption = f'val: {value.item():.2f}'
-            value_color = (255, 255, 255, 255)
-            caption_below_list += [(value_caption, value_color)]
-
-        captioned_obs = add_caption_to_observation(
-            caption_above_list=[(action_caption, )],
-            obs=obs,
-            caption_below_list=caption_below_list
-        )
-        return torch.from_numpy(captioned_obs).permute(2, 0, 1) / 255.
+    return torch.stack(video)
 
 
-def visualize_trajectory(trajectory, action_table=None):
-    obs, action, reward, cont = stack_trajectory(trajectory)
-    vizualize_step = CaptionedObsFactory(action_table=action_table)
-    panel = [vizualize_step(*step) for step in zip(obs, action, reward, cont)]
-    return torch.stack(panel)
+def make_trajectory_panel(trajectory, action_meanings=None):
+    panel = visualize_buff(trajectory, action_meanings=action_meanings)
+    panel_tensor = torch.from_numpy(panel)
+    return make_grid(panel_tensor)
 
 
-def visualize_imagined_trajectory(obs_dec, action, rewards_dec, cont, value_preds, action_table):
-    frames = []
-    for t in range(obs_dec.size(0)):
-        frames += [make_panel(obs_dec[t], action[t], rewards_dec[t], cont[t], value=value_preds[t], action_table=action_table)]
-    return torch.stack(frames)
-
-
-def make_trajectory_panel(trajectory, action_table=None):
-    panel = visualize_trajectory(trajectory, action_table)
-    return make_grid(panel)
-
-
-def visualize_step(step, action_meanings=None, info_keys=None):
-
+def visualize_step(step, action_meanings=None, info_keys=None, image_hw=None):
     if action_meanings is not None:
         action_caption = f'{action_meanings[step.action.argmax().item()]}'
     else:
         action_caption = f'action: {step.action.argmax().item()}'
 
-    reward_caption = f'rew: {step.reward.item():.2f}'
+    reward_caption = f'rew: {step.reward.item():.5f}'
     if - 0.1 < step.reward < 0.1:
         reward_color = (255, 255, 255, 255)
     elif step.reward < -0.1:
@@ -207,36 +152,36 @@ def visualize_step(step, action_meanings=None, info_keys=None):
     else:
         reward_color = (255, 255, 0, 255)
 
-    cont_caption = f'con: {step.cont.item():.2f}'
+    cont_caption = f'con: {step.cont.item():.5f}'
     cont_color = (floor(255 * (1 - step.cont.item())), 180, floor(255 * step.cont.item()), 255)
 
-    caption_below_list = [(reward_caption, reward_color), (cont_caption, cont_color)]
+    caption_below_list = [(action_caption,), (reward_caption, reward_color), (cont_caption, cont_color)]
 
     if info_keys is not None:
         for key in info_keys:
             if key in step.info:
-                caption_below_list += [(step.info[key])]
+                caption = f'{key}: {step.info[key].item()}'
+                caption_below_list += [(caption,)]
             else:
                 raise Exception(f'key {key} was not found in step')
 
     captioned_obs = add_caption_to_observation(
-        caption_above_list=[(action_caption,)],
         obs=step.observation,
         caption_below_list=caption_below_list
     )
 
+    if image_hw is not None:
+        h, w, c = captioned_obs.shape
+        captioned_obs = np.pad(captioned_obs, ((0, image_hw[0] - h), (0, image_hw[1] - w), (0, 0)))
+
     return captioned_obs.transpose((2, 0, 1))
 
 
-def filter(filter, *tensors):
-    return tuple([tensor[filter] for tensor in tensors])
+def visualize_buff(buff, image_hw=None, action_meanings=None, info_keys=None):
+    return np.stack([visualize_step(step, action_meanings, info_keys, image_hw) for step in buff])
 
 
-def visualize_buff(buff, action_meanings=None):
-    return np.stack([visualize_step(step, action_meanings) for step in buff])
-
-
-def make_panel(obs, action, reward, cont, value=None, filter_mask=None, action_table=None, nrow=8):
+def make_panel(obs, action, reward, cont, value=None, action_meanings=None, nrow=8):
     """
     obs: observations [..., C, H, W]
     action: discrete action [..., AD, AC]
@@ -246,66 +191,41 @@ def make_panel(obs, action, reward, cont, value=None, filter_mask=None, action_t
     action_table: {0: "action1", 1:{action2}... etc}
     """
 
-    if filter_mask is None:
-        filter_mask = torch.full_like(reward.squeeze(), True, dtype=torch.bool, device=obs.device)
-
-    obs_sample = obs[filter_mask]
-    action_sample = action[filter_mask]
-    reward_sample = reward[filter_mask]
-    cont_sample = cont[filter_mask]
-    if value is not None:
-        value_sample = value[filter_mask]
-    else:
-        value_sample = [None] * cont_sample.shape[0]
-
-    visualize_step = CaptionedObsFactory(action_table=action_table)
-
-    panel = [visualize_step(*step) for step in zip(obs_sample, action_sample, reward_sample, cont_sample, value_sample)]
+    buff = replay.unstack_batch(obs, action, reward, cont, value=value)
+    panel = visualize_buff(buff, action_meanings=action_meanings)
+    panel = torch.from_numpy(panel)
 
     if len(panel) == 0:
         return make_grid(torch.zeros(1, 3, 64, 64))
 
-    return make_grid(torch.stack(panel), nrow)
+    return make_grid(panel, nrow)
 
 
-def make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, filter_mask=None,
-                       action_table=None):
-    gt_panel = make_panel(obs, action, reward, cont, filter_mask=filter_mask, action_table=action_table)
-    pred_panel = make_panel(obs_pred, action, reward_pred, cont_pred, filter_mask=filter_mask,
-                            action_table=action_table)
-    return torch.cat((gt_panel, pred_panel), dim=-1)
-
-
-def make_batch_panels(obs, action, reward, cont, obs_pred, reward_pred, cont_pred, action_table=None):
-    batch_filter_mask = torch.full_like(reward[:, :, 0], False, dtype=torch.bool)
-    batch_filter_mask[0:8, 0:8] = True
-    batch_panel = make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred,
-                                     batch_filter_mask, action_table=action_table)
-
-    rewards_filter = (reward.abs().squeeze() > 0.1)
-    rewards_panel = make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred,
-                                       rewards_filter, action_table=action_table)
-
-    terminal_filter = (cont.squeeze() == 0.0)
-    terminal_panel = make_gt_pred_panel(obs, action, reward, cont, obs_pred, reward_pred, cont_pred,
-                                        terminal_filter, action_table=action_table)
-
-    return batch_panel, rewards_panel, terminal_panel
-
-
-def decode_trajectory(rssm, latest_trajectory):
-    decoded_trajectory = []
+def decode_trajectory(rssm, latest_trajectory, critic):
+    observations, actions, rewards, cont, value = [], [], [], [], []
     h = rssm.new_hidden0(batch_size=1)
     obs = torch.from_numpy(latest_trajectory[0].observation).permute(2, 0, 1).unsqueeze(0).to(rssm.device) / 255.
+    action = torch.from_numpy(latest_trajectory[0].action).unsqueeze(0).to(rssm.device)
     z = rssm.encode_observation(h, obs).mode
-    for step in latest_trajectory:
-        decoded_trajectory += [rssm.decoder(h, z).mean]
+
+    observations += [rssm.decoder(h, z).mean]
+    actions += [action]
+    rewards += [rssm.reward_pred(h, z).mean]
+    cont += [rssm.continue_pred(h, z).mean]
+    value += [critic(h, z).mean.unsqueeze(-1)]
+
+    for step in list(latest_trajectory)[1:]:
+        h, z = rssm.step_reality(h, obs, action)
+        observations += [rssm.decoder(h, z).mean]
+        rewards += [rssm.reward_pred(h, z).mean]
+        cont += [rssm.continue_pred(h, z).mean]
+        value += [critic(h, z).mean.unsqueeze(-1)]
+
+        obs = torch.from_numpy(step.observation).permute(2, 0, 1).unsqueeze(0).to(rssm.device) / 255.
+        action = torch.from_numpy(step.action).unsqueeze(0).to(rssm.device)
+        actions += [action]
+
         if step.is_terminal:
             break
-        obs = torch.from_numpy(latest_trajectory[0].observation).permute(2, 0, 1).unsqueeze(0).to(rssm.device) / 255.
-        action = torch.from_numpy(step.action).unsqueeze(0).to(rssm.device)
-        h, z = rssm.step_reality(h, obs, action)
 
-    decoded_trajectory = torch.stack(decoded_trajectory, dim=1)
-    decoded_trajectory = (decoded_trajectory * 255).to(dtype=torch.uint8, device='cpu').numpy()
-    return decoded_trajectory
+    return torch.stack(observations), torch.stack(actions), torch.stack(rewards), torch.stack(cont), torch.stack(value)

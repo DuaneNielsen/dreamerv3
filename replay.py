@@ -1,4 +1,5 @@
-from envs.env import Env
+import symlog
+from gridworlds.env import Env
 import torch
 from collections import deque
 import numpy as np
@@ -91,6 +92,26 @@ def transform_rgb_image(rgb_array):
     return torch.from_numpy(rgb_array).permute(0, 1, 4, 2, 3) / 255.0
 
 
+def symlog_rgb_image(rgb_array):
+    return symlog.symlog(torch.from_numpy(rgb_array).permute(0, 1, 4, 2, 3).float())
+
+
+def invert_symlog(symlog_rgb_tensor):
+    lead_dims = symlog_rgb_tensor.shape[:-3]
+    image = symlog_rgb_tensor.flatten(0, len(lead_dims)-1)
+    image = image.permute(0, 2, 3, 1)
+    image = image.unflatten(0, lead_dims)
+    return symlog.symexp(image).to(dtype=torch.uint8)
+
+
+def invert_to_tensor(image):
+    lead_dims = image.shape[:-3]
+    image = image.flatten(0, len(lead_dims)-1)
+    image = image.permute(0, 2, 3, 1)
+    image = image.unflatten(0, lead_dims)
+    return (image * 255).to(dtype=torch.uint8)
+
+
 class BatchLoader:
     def __init__(self, device='cpu', observation_transform=None):
         self.device = device
@@ -154,20 +175,38 @@ def unroll(tensor):
     return [trajectory.aslist() for trajectory in tensor.unbind(1)]
 
 
-def unstack_batch(observation, action, reward, cont, inverse_obs_transform=None, **kwargs):
+def unstack_batch(observation, action, reward, cont, inverse_obs_transform=None, return_type=None, **kwargs):
+    """
+    input in T, N, ... format
+    """
     T, N = observation.shape[0:2]
     if inverse_obs_transform is not None:
         observation = inverse_obs_transform(observation)
+    else:
+        observation = invert_symlog(observation)
     buff = []
-    for n in range(N):
-        for t in range(T):
-            obs_step = observation[t, n].detach().cpu().numpy()
-            action_step = action[t, n].detach().cpu().numpy()
-            reward_step = reward[t, n].detach().cpu().numpy()
-            cont_step = cont[t, n].detach().cpu().numpy()
-            arg_step = {arg: kwargs[arg][t, n].detach().cpu().numpy() for arg in kwargs}
-            buff += [Step(obs_step, action_step, reward_step, cont=cont_step, **arg_step)]
-    return buff
+
+    observation = observation.detach().cpu().numpy()
+    action = action.detach().cpu().numpy()
+    reward = reward.detach().cpu().numpy()
+    cont = cont.detach().cpu().numpy()
+    kwargs = {arg: kwargs[arg].detach().cpu().numpy() for arg in kwargs}
+
+    if return_type is None:
+        for n in range(N):
+            for t in range(T):
+                args_step = {arg: kwargs[arg][t, n] for arg in kwargs}
+                buff += [Step(observation[t, n], action[t, n], reward[t, n], cont[t, n], **args_step)]
+        return buff
+
+    if return_type is 'list':
+        for n in range(N):
+            trajectory = []
+            for t in range(T):
+                args_step = {arg: kwargs[arg][t, n] for arg in kwargs}
+                trajectory += [Step(observation[t, n], action[t, n], reward[t, n], cont[t, n], **args_step)]
+            buff += [trajectory]
+        return buff
 
 
 if __name__ == '__main__':
