@@ -26,10 +26,38 @@
 
 import torch
 import torch.nn as nn
-from torch.distributions import Normal, Bernoulli, OneHotCategorical
+from torch.distributions import Normal, Bernoulli, OneHotCategorical, Categorical
 from dists import OneHotCategoricalStraightThru, categorical_kl_divergence_clamped, TwoHotSymlog, \
     OneHotCategoricalUnimix
 from blocks import MLPBlock, ModernDecoderConvBlock, Embedder, DecoderConvBlock
+from torch.nn.functional import one_hot
+
+
+class GridworldPosEncoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, h, e):
+        if len(e.shape) == 3:
+            T, N = e.shape[0:2]
+        else:
+            T, N = 1, e.shape[0]
+
+        indices = torch.zeros(T, N, 32, dtype=torch.long, device=h.device)
+        indices[torch.arange(T), torch.arange(N), 0:2] = e[torch.arange(N)].long()
+        indices[torch.arange(T), torch.arange(N), 2:] = 1
+        z = one_hot(indices, 32).float()
+        if len(e.shape) == 2:
+            return z[0]
+        return z
+
+
+class GridworldPosDecoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, h, z):
+        return Categorical(z[..., 0:2, :])
 
 
 class Encoder(nn.Module):
@@ -287,7 +315,10 @@ class RSSM(nn.Module):
 
         z = self.encode_observation(h, obs).mode
         h = self.seq_model(z, a, h)
-        return h, z
+        r = self.reward_pred(h, z)
+        c = self.continue_pred(h, z)
+        decode_obs = self.decoder(h, z)
+        return h, z, r, c, decode_obs
 
     def single_step_imagine(self, h, z, a):
         """
@@ -415,6 +446,25 @@ def make_small(action_classes, in_channels=3, decoder=None):
     )
 
 
+def make_small_gridworld(action_classes):
+    """
+    Small as per Appendix B of the Mastering Diverse Domains through World Models paper
+    :param action_classes:
+    :return:
+    """
+
+    return RSSM(
+        sequence_model=SequenceModel(action_classes),
+        embedder=nn.Identity(),
+        encoder=GridworldPosEncoder(),
+        decoder=GridworldPosDecoder(),
+        dynamics_pred=DynamicsPredictor(),
+        reward_pred=RewardPredictor(),
+        continue_pred=ContinuePredictor(),
+        h_size=512
+    )
+
+
 if __name__ == '__main__':
 
     """
@@ -436,7 +486,7 @@ if __name__ == '__main__':
         args = parser.parse_args()
 
         rssm = make_small(action_classes=args.action_classes, in_channels=3)
-        steps, _ = utils.load(args.resume, rssm)
+        steps, _ = torch.load(args.resume, rssm)
 
 
         class ImaginedEnv:

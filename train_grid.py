@@ -1,5 +1,4 @@
 import gymnasium
-from gridworlds.simpler_gridworld import PartialRGBObservationWrapper
 
 import replay
 from gridworlds.wrappers import OneHotActionWrapper, MaxCombineObservations
@@ -18,31 +17,41 @@ from utils import register_gradient_clamp
 from viz import visualize_buff, VizStep, ValueHook
 from wandb.data_types import Video
 import viz
-import gridworlds.gridworld as gridworld
 import numpy as np
 from torchvision.utils import make_grid
+import gridworlds.simpler_gridworld as gridworld
+from gridworlds.gridworld import OneHotTensorActionWrapper
+
+
+def identity(obs):
+    return obs
 
 
 def rollout(env, actor, rssm, pad_action):
     obs, info = env.reset()
     h = rssm.new_hidden0(batch_size=1)
-    obs_tensor = to_tensor(obs).to(rssm.device).unsqueeze(0)
+    obs_tensor = torch.from_numpy(obs[0]).to(rssm.device).unsqueeze(0)
     z = rssm.encode_observation(h, obs_tensor).mode
+    r_pred, c_pred, obs_pred = rssm.reward_pred(h, z), rssm.continue_pred(h, z), rssm.decoder(h, z)
     reward, terminated, truncated = 0.0, False, False
 
     while True:
         action = actor(h, z).sample()
-        yield Step(obs, action[0].detach().cpu().numpy(), reward, terminated, truncated)
+        yield Step(obs[0], action[0].detach().cpu().numpy(), reward, terminated, truncated,
+                   reward_pred=r_pred.mean.detach().cpu().numpy(), cont_pred=c_pred.probs.detach().cpu().numpy(),
+                   obs_pred=obs_pred.mode[0].detach().cpu().numpy())
 
         obs, reward, terminated, truncated, info = env.step(action[0].cpu())
-        obs_tensor = to_tensor(obs).to(rssm.device).unsqueeze(0)
-        h, z = rssm.step_reality(h, obs_tensor, action)
+        obs_tensor = torch.from_numpy(obs[0]).to(rssm.device).unsqueeze(0)
+        h, z, r_pred, c_pred, obs_pred = rssm.step_reality(h, obs_tensor, action)
 
         if terminated or truncated:
-            yield Step(obs, pad_action, reward, terminated, truncated)
+            yield Step(obs[0], pad_action, reward, terminated, truncated,
+                       reward_pred=r_pred.mean.detach().cpu().numpy(), cont_pred=c_pred.probs.detach().cpu().numpy(),
+                       obs_pred=obs_pred.mode[0].detach().cpu().numpy())
 
             obs, info = env.reset()
-            obs_tensor = to_tensor(obs).to(rssm.device).unsqueeze(0)
+            obs_tensor = torch.from_numpy(obs[0]).to(rssm.device).unsqueeze(0)
             h = rssm.new_hidden0(batch_size=1)
             z = rssm.encode_observation(h, obs_tensor).mode
             reward, terminated, truncated = 0.0, False, False
@@ -74,13 +83,20 @@ class WorldModelTrainer(nn.Module):
 
     def log_images(self, vizualiser):
         with torch.no_grad():
-            viz_batch_gt_buff = replay.unstack_batch(self.obs[0:8, 0:8], self.action[0:8, 0:8], self.reward[0:8, 0:8], self.cont[0:8, 0:8])
-            viz_batch_pred_buff = replay.unstack_batch(self.obs_dist.mean[0:8, 0:8], self.action[0:8, 0:8], self.reward_dist.mean[0:8, 0:8], self.cont_dist.mean[0:8, 0:8])
+            viz_batch_gt_buff = replay.unstack_batch(self.obs[0:8, 0:8], self.action[0:8, 0:8], self.reward[0:8, 0:8],
+                                                     self.cont[0:8, 0:8], inverse_obs_transform=identity)
+            viz_batch_pred_buff = replay.unstack_batch(self.obs_dist.mode[0:8, 0:8], self.action[0:8, 0:8],
+                                                       self.reward_dist.mean[0:8, 0:8], self.cont_dist.mean[0:8, 0:8],
+                                                       inverse_obs_transform=identity)
             viz_batch_gt = visualize_buff(viz_batch_gt_buff, vizualiser)
             viz_batch_pred = visualize_buff(viz_batch_pred_buff, vizualiser)
-            batch_panel = torch.cat((make_grid(torch.from_numpy(viz_batch_gt)), make_grid(torch.from_numpy(viz_batch_pred))), dim=2).numpy().transpose(1, 2, 0)
-            viz_gt_buff = replay.unstack_batch(self.obs, self.action, self.reward, self.cont)
-            viz_pred_buff = replay.unstack_batch(self.obs_dist.mean, self.action, self.reward_dist.mean, self.cont_dist.mean)
+            batch_panel = torch.cat(
+                (make_grid(torch.from_numpy(viz_batch_gt)), make_grid(torch.from_numpy(viz_batch_pred))),
+                dim=2).numpy().transpose(1, 2, 0)
+            viz_gt_buff = replay.unstack_batch(self.obs, self.action, self.reward, self.cont,
+                                               inverse_obs_transform=identity)
+            viz_pred_buff = replay.unstack_batch(self.obs_dist.mode, self.action, self.reward_dist.mean,
+                                                 self.cont_dist.mean, inverse_obs_transform=identity)
 
             def side_by_side(left_buff, right_buff, filter_lam):
                 side_by_side = []
@@ -116,6 +132,53 @@ class WorldModelTrainer(nn.Module):
         }
 
 
+class VizGridPosStep(VizStep):
+    def __init__(self, action_meanings, env_name):
+        super().__init__(action_meanings=action_meanings, hw=(64, 64))
+        self.env_name = env_name
+        self.grid, self.grid_steps, _, _ = gridworld.make_grid(self.env_name)
+
+    def observation(self, step):
+        obs = np.clip(step.observation, a_min=0, a_max=15), self.grid, gridworld.yellow
+
+        return gridworld.render(obs, (64, 64))
+
+    def __call__(self, step):
+        images = [self.observation(step), self.action(step), self.reward(step), self.cont(step)]
+        for viz_f in self.hooks:
+            images += [viz_f(step)]
+        image = np.concatenate(images, 0)
+        return image.transpose((2, 0, 1))
+
+
+class ObsPredHook:
+    def __init__(self, env_name):
+        self.env_name = env_name
+        self.grid, self.grid_steps, _, _ = gridworld.make_grid(self.env_name)
+
+    def __call__(self, step):
+        if 'obs_pred' in step.info:
+            obs = np.clip(step.info['obs_pred'], a_min=0, a_max=15), self.grid, gridworld.yellow
+            image = gridworld.render(obs, (64, 64))
+        else:
+            image = np.zeros((1, 64, 3), dtype=np.uint8)
+        return image
+
+
+def viz_reward_pred(step):
+    if 'reward_pred' in step.info:
+        return viz.viz_reward(step.info['reward_pred'])
+    else:
+        return np.zeros((1, 64, 3), dtype=np.uint8)
+
+
+def viz_cont_pred(step):
+    if 'cont_pred' in step.info:
+        return viz.viz_reward(step.info['cont_pred'])
+    else:
+        return np.zeros((1, 64, 3), dtype=np.uint8)
+
+
 if __name__ == '__main__':
 
     parser = ArgumentParser()
@@ -143,34 +206,27 @@ if __name__ == '__main__':
 
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    project_name = f"dreamerv3-{args.env.replace('/', '-')}"
+    project_name = f"dreamerv3-{args.env.replace('/', '-')}-pos_grid"
     project_name = project_name + '-dev' if args.dev else project_name
     wandb.init(project=project_name)
     run_dir = utils.next_run()
     wandb.config.update(args)
 
-    if 'ALE' in args.env:
-        env = gymnasium.make(args.env, frameskip=4)
-        env = OneHotActionWrapper(env)
-        env = gymnasium.wrappers.FrameStack(env, 2)
-        env = MaxCombineObservations(env)
-        env = gymnasium.wrappers.ResizeObservation(env, (64, 64))
+    env = gymnasium.make(args.env)
+    env = OneHotTensorActionWrapper(env)
 
-    if 'SimpleGridworld' in args.env:
-        env = gymnasium.make(args.env, max_episode_steps=100)
-        env = gridworld.RGBImageWrapper(env)
-        env = gridworld.OneHotTensorActionWrapper(env)
-
-    if 'SimplerGridWorld' in args.env:
-        env = gymnasium.make(args.env)
-        env = PartialRGBObservationWrapper(env)
-        env = gridworld.OneHotTensorActionWrapper(env)
+    action_table = env.get_action_meanings()
+    vizualizer = VizGridPosStep(action_meanings=env.get_action_meanings(), env_name='grab_em_all')
+    visualizer_traj = VizGridPosStep(action_meanings=action_table, env_name='grab_em_all')
+    visualizer_traj.add_hook(ObsPredHook(env_name='grab_em_all'))
+    visualizer_traj.add_hook(viz_reward_pred)
+    visualizer_traj.add_hook(viz_cont_pred)
+    visualizer_traj.add_hook(ValueHook())
 
     pad_action = np.zeros((1, env.action_space.n.item()))
     pad_action[:, 0] = 1.
-    action_table = env.get_action_meanings()
 
-    rssm = make_small(action_classes=env.action_space.n.item(), decoder=args.decoder).to(args.device)
+    rssm = make_small_gridworld(action_classes=env.action_space.n.item()).to(args.device)
 
     world_model_trainer = WorldModelTrainer(rssm,
                                             lr=args.world_model_learning_rate,
@@ -200,7 +256,7 @@ if __name__ == '__main__':
         step, run_args = checkpoint['step'], checkpoint['args']
         print(f'resuming from step {step} of {args.resume} with {run_args}')
 
-    loader = BatchLoader(device=args.device, observation_transform=replay.symlog_rgb_image)
+    loader = BatchLoader(device=args.device, observation_transform=None)
 
     for step in range(args.max_steps):
 
@@ -220,45 +276,41 @@ if __name__ == '__main__':
         wandb.log({k: wandb.Histogram(v) for k, v in actor_critic_trainer.log_distributions().items()}, step=step)
         wandb.log({k: wandb.Histogram(v) for k, v in world_model_trainer.log_distributions().items()}, step=step)
 
+
+        def prepro_pos(obs):
+            return torch.from_numpy(obs)
+
+
         if buff[-1].is_terminal:
-
-            def prepro_image(observation):
-                return torch.from_numpy(observation).permute(2, 0, 1) / 255.
-
-            vizualizer = VizStep(action_meanings=action_table)
-            vizualizer.add_hook(ValueHook())
             latest_trajectory = replay.get_tail_trajectory(buff)
             trajectory_reward = replay.total_reward(latest_trajectory)
-            trajectory_viz = viz.visualize_buff(latest_trajectory, visualizer=vizualizer)
-            dec_trajectory = viz.decode_trajectory(rssm, latest_trajectory, critic, prepro_image)
-            dec_buff = replay.unstack_batch(*dec_trajectory[0:-1], value=dec_trajectory[-1])
-
-            dec_trajectory_viz = viz.visualize_buff(dec_buff, visualizer=vizualizer)
-            side_by_side = np.concatenate((trajectory_viz, dec_trajectory_viz), axis=3)
+            trajectory_reward_pred = replay.sum_key(latest_trajectory, 'reward_pred')
+            trajectory_viz = viz.visualize_buff(latest_trajectory, visualizer=visualizer_traj)
 
             wandb.log({
                 'trajectory_reward': trajectory_reward,
+                'trajectory_reward_pred': trajectory_reward_pred,
                 'trajectory_length': len(latest_trajectory),
-                'trajectory_viz': Video(side_by_side)
+                'trajectory_viz': Video(trajectory_viz)
             }, step=step)
 
-            print(f'trajectory end: reward {trajectory_reward} len: {len(latest_trajectory)}')
+            print(
+                f'trajectory end:  len: {len(latest_trajectory)} reward {trajectory_reward} reward_pred: {trajectory_reward_pred}')
 
-        if step % args.log_every_n_steps == 0:
-            vizualizer = VizStep(action_meanings=action_table)
-            wandb.log({k: wandb.Image(v) for k, v in world_model_trainer.log_images(vizualizer).items()}, step=step)
+    if step % args.log_every_n_steps == 0:
+        wandb.log({k: wandb.Image(v) for k, v in world_model_trainer.log_images(vizualizer).items()}, step=step)
 
-            imag_obs = rssm.decoder(imag_h, imag_z).mean
-            imag_returns = actor_critic_trainer.log_distributions()['ac_returns'].to(args.device)
-            imagined_trajectory_viz = viz.visualize_imagined_trajectories(
-                imag_obs[:-1, :], imag_action[:-1, :], imag_rewards[:-1, :], imag_cont[:-1, :],
-                imag_returns[:, :],visualizer=vizualizer)
+        imag_obs = rssm.decoder(imag_h, imag_z).mode
+        imag_returns = actor_critic_trainer.log_distributions()['ac_returns'].to(args.device)
+        imagined_trajectory_viz = viz.visualize_imagined_trajectories(
+            imag_obs[:-1, :], imag_action[:-1, :], imag_rewards[:-1, :], imag_cont[:-1, :],
+            imag_returns[:, :], visualizer=visualizer_traj, inverse_obs_transform=identity)
 
-            wandb.log({'ac_imagined_trajectory': wandb.Video(imagined_trajectory_viz)}, step=step)
+        wandb.log({'ac_imagined_trajectory': wandb.Video(imagined_trajectory_viz)}, step=step)
 
-            torch.save({
-                'args': args,
-                'step': step,
-                'actor_critic_trainer_state_dict': actor_critic_trainer.state_dict(),
-                'world_model_state_dict': world_model_trainer.state_dict(),
-            }, run_dir + '/checkpoint.pt')
+        torch.save({
+            'args': args,
+            'step': step,
+            'actor_critic_trainer_state_dict': actor_critic_trainer.state_dict(),
+            'world_model_state_dict': world_model_trainer.state_dict(),
+        }, run_dir + '/checkpoint.pt')

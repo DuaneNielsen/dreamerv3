@@ -109,18 +109,14 @@ def make_caption(caption, color=(255, 255, 255, 255), fontsize=8, width=64, heig
     return np.array(img)
 
 
-def add_caption_to_observation(obs, caption_below_list):
-    bottom_captions = [make_caption(*caption) for caption in caption_below_list]
-    bottom_captions = np.concatenate(bottom_captions, 0)
-    return np.concatenate([obs, bottom_captions], 0)
-
-
-def visualize_imagined_trajectories(obs_dec, action, rewards_dec, cont, value_preds, action_meanings):
+def visualize_imagined_trajectories(obs_dec, action, rewards_dec, cont, value_preds, visualizer,
+                                    inverse_obs_transform=None):
     T, N = obs_dec.shape[0:2]
-    imagine_buff = replay.unstack_batch(obs_dec, action, rewards_dec, cont, value=value_preds, return_type='list')
+    imagine_buff = replay.unstack_batch(obs_dec, action, rewards_dec, cont, value=value_preds, return_type='list',
+                                        inverse_obs_transform=inverse_obs_transform)
     imagine_viz = []
     for trajectory in imagine_buff:
-        imagine_viz += [viz.visualize_buff(trajectory, action_meanings=action_meanings)]
+        imagine_viz += [viz.visualize_buff(trajectory, visualizer=visualizer)]
     video = []
     for t in range(T):
         frame = [images[t] for images in imagine_viz]
@@ -131,58 +127,91 @@ def visualize_imagined_trajectories(obs_dec, action, rewards_dec, cont, value_pr
 
 
 def make_trajectory_panel(trajectory, action_meanings=None):
-    panel = visualize_buff(trajectory, action_meanings=action_meanings)
+    panel = visualize_buff(trajectory, visualizer=VizStep(action_meanings=action_meanings))
     panel_tensor = torch.from_numpy(panel)
     return make_grid(panel_tensor)
 
 
-def visualize_step(step, action_meanings=None, info_keys=None, image_hw=None):
-    if action_meanings is not None:
-        action_caption = f'{action_meanings[step.action.argmax().item()]}'
-    else:
-        action_caption = f'action: {step.action.argmax().item()}'
+def viz_reward(reward):
+    reward_caption = f'rew: {reward.item():.5f}'
 
-    reward_caption = f'rew: {step.reward.item():.5f}'
-
-    if - 0.1 < step.reward < 0.1:
+    if - 0.1 < reward < 0.1:
         reward_color = (255, 255, 255, 255)
-    elif step.reward < -0.1:
+    elif reward < -0.1:
         reward_color = (255, 0, 0, 255)
-    elif step.reward > 0.1:
+    elif reward > 0.1:
         reward_color = (0, 255, 0, 255)
     else:
         reward_color = (255, 255, 0, 255)
-
-    cont_caption = f'con: {step.cont.item():.5f}'
-    cont_color = (floor(255 * (1 - step.cont.item())), 180, floor(255 * step.cont.item()), 255)
-
-    caption_below_list = [(action_caption,), (reward_caption, reward_color), (cont_caption, cont_color)]
-
-    if info_keys is not None:
-        for key in info_keys:
-            if key in step.info:
-                caption = f'{key}: {step.info[key].item()}'
-                caption_below_list += [(caption,)]
-            else:
-                raise Exception(f'key {key} was not found in step')
-
-    obs = step.observation / np.max(step.observation) * 255
-    obs = obs.astype(np.uint8)
-
-    captioned_obs = add_caption_to_observation(
-        obs=obs,
-        caption_below_list=caption_below_list
-    )
-
-    if image_hw is not None:
-        h, w, c = captioned_obs.shape
-        captioned_obs = np.pad(captioned_obs, ((0, image_hw[0] - h), (0, image_hw[1] - w), (0, 0)))
-
-    return captioned_obs.transpose((2, 0, 1))
+    return make_caption(reward_caption, reward_color)
 
 
-def visualize_buff(buff, image_hw=None, action_meanings=None, info_keys=None):
-    return np.stack([visualize_step(step, action_meanings, info_keys, image_hw) for step in buff])
+def viz_cont(cont):
+    cont_caption = f'con: {cont.item():.5f}'
+    cont_color = (floor(255 * (1 - cont.item())), 180, floor(255 * cont.item()), 255)
+    return make_caption(cont_caption, cont_color)
+
+
+class VizAction:
+    def __init__(self, action_meanings):
+        self.action_meanings = action_meanings
+
+    def __call__(self, action):
+        if self.action_meanings is not None:
+            action_caption = f'{self.action_meanings[action.argmax().item()]}'
+        else:
+            action_caption = f'action: {action.argmax().item()}'
+        return make_caption(action_caption)
+
+
+class VizStep:
+    def __init__(self, action_meanings=None, hw=None):
+        self.viz_action = VizAction(action_meanings)
+        self.hw = hw
+        self.hooks = []
+
+    def observation(self, step):
+        obs = step.observation / np.max(step.observation) * 255
+        obs = obs.astype(np.uint8)
+        return obs
+
+    def action(self, step):
+        return self.viz_action(step.action)
+
+    def reward(self, step):
+        return viz_reward(step.reward)
+
+    def cont(self, step):
+        return viz_cont(step.cont)
+
+    def add_hook(self, viz_f):
+        self.hooks += [viz_f]
+
+    def __call__(self, step):
+        images = [self.observation(step), self.action(step), self.reward(step), self.cont(step)]
+        for viz_f in self.hooks:
+            images += [viz_f(step)]
+        image = np.concatenate(images, 0)
+        if self.hw is not None:
+            h, w, c = image.shape
+            image = np.pad(image, ((0, self.hw[0] - h), (0, self.hw[1] - w), (0, 0)))
+        return image.transpose((2, 0, 1))
+
+
+class ValueHook:
+    def __init__(self):
+        self.color = (255, 255, 200)
+
+    def __call__(self, step):
+        if 'value' in step.info:
+            val = step.info['value']
+            return make_caption(f'value: {val}', color=self.color)
+        else:
+            return make_caption(f'no value', color=self.color)
+
+
+def visualize_buff(buff, visualizer):
+    return np.stack([visualizer(step) for step in buff])
 
 
 def make_panel(obs, action, reward, cont, value=None, action_meanings=None, nrow=8):
@@ -196,7 +225,7 @@ def make_panel(obs, action, reward, cont, value=None, action_meanings=None, nrow
     """
 
     buff = replay.unstack_batch(obs, action, reward, cont, value=value)
-    panel = visualize_buff(buff, action_meanings=action_meanings)
+    panel = visualize_buff(buff, visualizer=VizStep(action_meanings=action_meanings))
     panel = torch.from_numpy(panel)
 
     if len(panel) == 0:
@@ -205,31 +234,27 @@ def make_panel(obs, action, reward, cont, value=None, action_meanings=None, nrow
     return make_grid(panel, nrow)
 
 
-def decode_trajectory(rssm, latest_trajectory, critic):
+def decode_trajectory(rssm, latest_trajectory, critic, prepro_obs):
     observations, actions, rewards, cont, value = [], [], [], [], []
     h = rssm.new_hidden0(batch_size=1)
-    obs = torch.from_numpy(latest_trajectory[0].observation).permute(2, 0, 1).unsqueeze(0).to(rssm.device) / 255.
-    action = torch.from_numpy(latest_trajectory[0].action).unsqueeze(0).to(rssm.device)
-    z = rssm.encode_observation(h, obs).mode
+    # obs = prepro_obs(latest_trajectory[0].observation).to(rssm.device).unsqueeze(0)
+    # action = torch.from_numpy(latest_trajectory[0].action).unsqueeze(0).to(rssm.device)
+    # observations += [rssm.decoder(h, z).mode]
+    # actions += [action]
+    # rewards += [rssm.reward_pred(h, z).mean]
+    # cont += [rssm.continue_pred(h, z).mean]
+    # value += [critic(h, z).mean.unsqueeze(-1)]
 
-    observations += [rssm.decoder(h, z).mean]
-    actions += [action]
-    rewards += [rssm.reward_pred(h, z).mean]
-    cont += [rssm.continue_pred(h, z).mean]
-    value += [critic(h, z).mean.unsqueeze(-1)]
-
-    for step in list(latest_trajectory)[1:]:
-        h, z = rssm.step_reality(h, obs, action)
-        observations += [rssm.decoder(h, z).mean]
+    for i, step in enumerate(list(latest_trajectory)):
+        real_obs = prepro_obs(step.observation).to(rssm.device).unsqueeze(0)
+        action = torch.from_numpy(step.action).unsqueeze(0).to(rssm.device)
+        if i == 0:
+            z = rssm.encode_observation(h, real_obs)
+        observations += [rssm.decoder(h, z).mode]
+        actions += [action]
         rewards += [rssm.reward_pred(h, z).mean]
         cont += [rssm.continue_pred(h, z).mean]
         value += [critic(h, z).mean.unsqueeze(-1)]
-
-        obs = torch.from_numpy(step.observation).permute(2, 0, 1).unsqueeze(0).to(rssm.device) / 255.
-        action = torch.from_numpy(step.action).unsqueeze(0).to(rssm.device)
-        actions += [action]
-
-        if step.is_terminal:
-            break
+        h, z = rssm.step_reality(h, real_obs, action)
 
     return torch.stack(observations), torch.stack(actions), torch.stack(rewards), torch.stack(cont), torch.stack(value)

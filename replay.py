@@ -171,6 +171,14 @@ def total_reward(trajectory):
     return t_reward[0]
 
 
+def sum_key(trajectory, key):
+    sum = 0
+    for step in trajectory:
+        if key in step.info:
+            sum += step.info[key]
+    return sum[0]
+
+
 def unroll(tensor):
     return [trajectory.aslist() for trajectory in tensor.unbind(1)]
 

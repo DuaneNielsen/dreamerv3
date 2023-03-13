@@ -44,18 +44,6 @@ class Actor(nn.Module):
         action_logits = action_flat.unflatten(-1, (self.action_size, self.action_classes))
         return OneHotCategoricalStraightThru(logits=action_logits)
 
-    # def train_action(self, h, z):
-    #     logits = self(h, z)
-    #     return OneHotCategoricalUnimix(logits=logits)
-
-    # def sample_action(self, h, z):
-    #     action_logits = self.forward(h, z)
-    #     return OneHotCategoricalStraightThru(logits=action_logits).sample()
-
-    # def exploit_action(self, h, z):
-    #     action_logits = self.forward(h, z)
-    #     return OneHotCategorical(logits=action_logits).mode
-
 
 def score(reward, cont, value, discount=0.997, lamb_da=0.95):
     """
