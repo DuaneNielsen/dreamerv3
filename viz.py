@@ -143,6 +143,7 @@ def visualize_step(step, action_meanings=None, info_keys=None, image_hw=None):
         action_caption = f'action: {step.action.argmax().item()}'
 
     reward_caption = f'rew: {step.reward.item():.5f}'
+
     if - 0.1 < step.reward < 0.1:
         reward_color = (255, 255, 255, 255)
     elif step.reward < -0.1:
@@ -165,8 +166,11 @@ def visualize_step(step, action_meanings=None, info_keys=None, image_hw=None):
             else:
                 raise Exception(f'key {key} was not found in step')
 
+    obs = step.observation / np.max(step.observation) * 255
+    obs = obs.astype(np.uint8)
+
     captioned_obs = add_caption_to_observation(
-        obs=step.observation,
+        obs=obs,
         caption_below_list=caption_below_list
     )
 

@@ -9,6 +9,7 @@ from torchvision.transforms.functional import to_tensor
 from rssm import make_small, RSSMLoss
 from actor_critic import Actor, Critic, ActorCriticTrainer
 import torch
+import torch.nn as nn
 from torch.optim import Adam
 from argparse import ArgumentParser
 import utils
@@ -47,59 +48,68 @@ def rollout(env, actor, rssm, pad_action):
             reward, terminated, truncated = 0.0, False, False
 
 
-def train_world_model(buff, rssm, rssm_opt, rssm_criterion, step=None):
-    obs, action, reward, cont = loader.sample(buff, args.batch_length, args.batch_size)
+class WorldModelTrainer(nn.Module):
+    def __init__(self, rssm, lr, adam_eps, grad_clip, action_meanings=None):
+        super().__init__()
+        self.rssm = rssm
+        self.opt = Adam(rssm.parameters(), lr=lr, eps=adam_eps)
+        self.rssm_criterion = RSSMLoss()
+        register_gradient_clamp(self.rssm, grad_clip)
+        self.action_meanings = action_meanings
 
-    h0 = rssm.new_hidden0(args.batch_size)
-    obs_dist, reward_dist, cont_dist, z_prior, z_post = rssm(obs, action, h0)
-    rssm_loss = rssm_criterion(obs, reward, cont, obs_dist, reward_dist, cont_dist, z_prior, z_post)
+    def train_model(self, obs, action, reward, cont):
+        self.obs, self.action, self.reward, self.cont = obs, action, reward, cont
 
-    rssm_opt.zero_grad()
-    rssm_loss.backward()
-    rssm_opt.step()
+        h0 = rssm.new_hidden0(args.batch_size)
+        self.obs_dist, self.reward_dist, self.cont_dist, self.z_prior, self.z_post = rssm(obs, action, h0)
+        rssm_loss = self.rssm_criterion(self.obs, self.reward, self.cont,
+                                        self.obs_dist, self.reward_dist, self.cont_dist, self.z_prior, self.z_post)
 
-    with torch.no_grad():
-        wandb.log(rssm_criterion.loss_dict(), step=step)
+        self.opt.zero_grad()
+        rssm_loss.backward()
+        self.opt.step()
 
-        if step % args.log_every_n_steps == 0:
-            with torch.no_grad():
-                viz_batch_gt_buff = replay.unstack_batch(obs[0:8, 0:8], action[0:8, 0:8], reward[0:8, 0:8],
-                                                         cont[0:8, 0:8])
-                viz_batch_pred_buff = replay.unstack_batch(obs_dist.mean[0:8, 0:8], action[0:8, 0:8],
-                                                           reward_dist.mean[0:8, 0:8], cont_dist.mean[0:8, 0:8])
-                viz_batch_gt = visualize_buff(viz_batch_gt_buff, action_meanings=action_table)
-                viz_batch_pred = visualize_buff(viz_batch_pred_buff, action_meanings=action_table)
-                batch_panel = torch.cat(
-                    (make_grid(torch.from_numpy(viz_batch_gt)), make_grid(torch.from_numpy(viz_batch_pred))),
-                    dim=2).numpy().transpose(1, 2, 0)
+    def log_scalars(self):
+        return {**self.rssm_criterion.loss_dict()}
 
-                viz_gt_buff = replay.unstack_batch(obs, action, reward, cont)
-                viz_pred_buff = replay.unstack_batch(obs_dist.mean, action, reward_dist.mean, cont_dist.mean)
+    def log_images(self):
+        with torch.no_grad():
+            viz_batch_gt_buff = replay.unstack_batch(self.obs[0:8, 0:8], self.action[0:8, 0:8], self.reward[0:8, 0:8], self.cont[0:8, 0:8])
+            viz_batch_pred_buff = replay.unstack_batch(self.obs_dist.mean[0:8, 0:8], self.action[0:8, 0:8], self.reward_dist.mean[0:8, 0:8], self.cont_dist.mean[0:8, 0:8])
+            viz_batch_gt = visualize_buff(viz_batch_gt_buff, action_meanings=self.action_meanings)
+            viz_batch_pred = visualize_buff(viz_batch_pred_buff, action_meanings=self.action_meanings)
+            batch_panel = torch.cat((make_grid(torch.from_numpy(viz_batch_gt)), make_grid(torch.from_numpy(viz_batch_pred))), dim=2).numpy().transpose(1, 2, 0)
+            viz_gt_buff = replay.unstack_batch(self.obs, self.action, self.reward, self.cont)
+            viz_pred_buff = replay.unstack_batch(self.obs_dist.mean, self.action, self.reward_dist.mean, self.cont_dist.mean)
 
-                def side_by_side(left_buff, right_buff, filter_lam):
-                    side_by_side = []
-                    for gt, pred in zip(left_buff, right_buff):
-                        if filter_lam(gt) or filter_lam(pred):
-                            side_by_side += [np.concatenate((visualize_step(gt), visualize_step(pred)), axis=1)]
-                    if len(side_by_side) == 0:
-                        return np.zeros((64, 64, 3), dtype=np.uint8)
-                    side_by_side = np.stack(side_by_side)
-                    return make_grid(torch.from_numpy(side_by_side)).permute(1, 2, 0).numpy()
+            def side_by_side(left_buff, right_buff, filter_lam):
+                side_by_side = []
+                for gt, pred in zip(left_buff, right_buff):
+                    if filter_lam(gt) or filter_lam(pred):
+                        side_by_side += [np.concatenate((visualize_step(gt), visualize_step(pred)), axis=1)]
+                if len(side_by_side) == 0:
+                    return np.zeros((64, 64, 3), dtype=np.uint8)
+                side_by_side = np.stack(side_by_side)
+                return make_grid(torch.from_numpy(side_by_side)).permute(1, 2, 0).numpy()
 
-                rewards_panel = side_by_side(viz_gt_buff, viz_pred_buff, lambda st: abs(st.reward) > 0.1)
-                terminal_panel = side_by_side(viz_gt_buff, viz_pred_buff, lambda st: st.cont > 0.1)
+            rewards_panel = side_by_side(viz_gt_buff, viz_pred_buff, lambda st: abs(st.reward) > 0.1)
+            terminal_panel = side_by_side(viz_gt_buff, viz_pred_buff, lambda st: st.cont < 0.05)
 
-                wandb.log({
-                    'wm_batch_panel': wandb.Image(batch_panel),
-                    'wm_nonzero_rewards_panel': wandb.Image(rewards_panel),
-                    'wm_terminal_state_panel': wandb.Image(terminal_panel),
-                    'wm_reward_gt': wandb.Histogram(reward.flatten().cpu(), num_bins=256),
-                    'wm_reward_pred': wandb.Histogram(reward_dist.mean.unsqueeze(-1).flatten().cpu(), num_bins=256),
-                    'wm_cont_gt': wandb.Histogram(cont.flatten().cpu(), num_bins=5),
-                    'wm_cont_probs': wandb.Histogram(cont_dist.probs.flatten().cpu(), num_bins=5),
-                    'wm_z_prior': wandb.Histogram(z_prior.argmax(-1).flatten().cpu().numpy(), num_bins=32),
-                    'wm_z_post': wandb.Histogram(z_post.argmax(-1).flatten().cpu().numpy()),
-                }, step=step)
+            return {
+                'wm_image_batch': batch_panel,
+                'wm_image_reward': rewards_panel,
+                'wm_image_terminal': terminal_panel
+            }
+
+    def log_distributions(self):
+        return {
+            'wm_reward_gt': self.reward.flatten().detach().cpu().numpy(),
+            'wm_reward_pred': self.reward_dist.mean.flatten().detach().cpu().numpy(),
+            'wm_cont_gt': self.cont.flatten().detach().cpu().numpy(),
+            'wm_cont_probs': self.cont_dist.probs.flatten().detach().cpu().numpy(),
+            'wm_z_prior': self.z_prior.argmax(-1).flatten().detach().cpu().numpy(),
+            'wm_z_post': self.z_prior.argmax(-1).flatten().detach().cpu().numpy(),
+        }
 
 
 if __name__ == '__main__':
@@ -153,13 +163,14 @@ if __name__ == '__main__':
         env = gridworld.OneHotTensorActionWrapper(env)
 
     pad_action = np.zeros((1, env.action_space.n.item()))
+    pad_action[:, 0] = 1.
     action_table = env.get_action_meanings()
 
     rssm = make_small(action_classes=env.action_space.n.item(), decoder=args.decoder).to(args.device)
-    rssm_opt = Adam(rssm.parameters(), lr=args.world_model_learning_rate, eps=args.world_model_adam_epsilon)
-    register_gradient_clamp(rssm, args.world_model_gradient_clipping)
-    rssm_criterion = RSSMLoss()
-
+    world_model_trainer = WorldModelTrainer(rssm,
+                                            lr=args.world_model_learning_rate,
+                                            adam_eps=args.world_model_adam_epsilon,
+                                            grad_clip=args.world_model_gradient_clipping)
     critic = Critic()
     actor = Actor(action_size=1, action_classes=env.action_space.n.item())
     actor_critic_trainer = ActorCriticTrainer(
@@ -178,8 +189,7 @@ if __name__ == '__main__':
 
     if args.resume:
         checkpoint = torch.load(args.resume)
-        rssm.load_state_dict(checkpoint['rssm_state_dict'])
-        rssm_opt.load_state_dict(checkpoint['rssm_opt_state_dict'])
+        world_model_trainer.load_state_dict(checkpoint['world_model_state_dict'])
         actor_critic_trainer.load_state_dict(checkpoint['actor_critic_trainer_state_dict'])
         step, run_args = checkpoint['step'], checkpoint['args']
         print(f'resuming from step {step} of {args.resume} with {run_args}')
@@ -189,7 +199,8 @@ if __name__ == '__main__':
     for step in range(args.max_steps):
 
         buff += [next(gen)]
-        train_world_model(buff, rssm, rssm_opt, rssm_criterion, step)
+        obs, action, reward, cont = loader.sample(buff, args.batch_length, args.batch_size)
+        world_model_trainer.train_model(obs, action, reward, cont)
 
         imag_batch_size = int(args.train_ratio / args.imagination_horizon)
         obs, act, reward, cont = loader.sample(buff, batch_length=1, batch_size=imag_batch_size)
@@ -199,8 +210,9 @@ if __name__ == '__main__':
 
         actor_critic_trainer.train_step(imag_h, imag_z, imag_action, imag_rewards, imag_cont)
 
-        wandb.log(actor_critic_trainer.log_scalars(), step=step)
+        wandb.log({**actor_critic_trainer.log_scalars(), **world_model_trainer.log_scalars()}, step=step)
         wandb.log({k: wandb.Histogram(v) for k, v in actor_critic_trainer.log_distributions().items()}, step=step)
+        wandb.log({k: wandb.Histogram(v) for k, v in world_model_trainer.log_distributions().items()}, step=step)
 
         if buff[-1].is_terminal:
             latest_trajectory = replay.get_tail_trajectory(buff)
@@ -221,6 +233,8 @@ if __name__ == '__main__':
             print(f'trajectory end: reward {trajectory_reward} len: {len(latest_trajectory)}')
 
         if step % args.log_every_n_steps == 0:
+            wandb.log({k: wandb.Image(v) for k, v in world_model_trainer.log_images().items()}, step=step)
+
             imag_obs = rssm.decoder(imag_h, imag_z).mean
             imag_returns = actor_critic_trainer.log_distributions()['ac_returns'].to(args.device)
             imagined_trajectory_viz = viz.visualize_imagined_trajectories(
@@ -233,6 +247,5 @@ if __name__ == '__main__':
                 'args': args,
                 'step': step,
                 'actor_critic_trainer_state_dict': actor_critic_trainer.state_dict(),
-                'rssm_state_dict': rssm.state_dict(),
-                'rssm_opt_state_dict': rssm_opt.state_dict()
+                'world_model_state_dict': world_model_trainer.state_dict(),
             }, run_dir + '/checkpoint.pt')

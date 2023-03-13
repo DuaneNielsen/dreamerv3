@@ -196,7 +196,7 @@ def unstack_batch(observation, action, reward, cont, inverse_obs_transform=None,
         for n in range(N):
             for t in range(T):
                 args_step = {arg: kwargs[arg][t, n] for arg in kwargs}
-                buff += [Step(observation[t, n], action[t, n], reward[t, n], cont[t, n], **args_step)]
+                buff += [Step(observation[t, n], action[t, n], reward[t, n], cont=cont[t, n], **args_step)]
         return buff
 
     if return_type is 'list':
@@ -204,7 +204,7 @@ def unstack_batch(observation, action, reward, cont, inverse_obs_transform=None,
             trajectory = []
             for t in range(T):
                 args_step = {arg: kwargs[arg][t, n] for arg in kwargs}
-                trajectory += [Step(observation[t, n], action[t, n], reward[t, n], cont[t, n], **args_step)]
+                trajectory += [Step(observation[t, n], action[t, n], reward[t, n], cont=cont[t, n], **args_step)]
             buff += [trajectory]
         return buff
 

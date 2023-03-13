@@ -1,3 +1,5 @@
+import pathlib
+
 import torch
 import torch.nn as nn
 from torch.optim import Adam
@@ -8,7 +10,7 @@ from copy import deepcopy
 
 
 class Critic(nn.Module):
-    def __init__(self,  h_size=512, z_size=32, z_classes=32, mlp_size=512, mlp_layers=2):
+    def __init__(self, h_size=512, z_size=32, z_classes=32, mlp_size=512, mlp_layers=2):
         super().__init__()
 
         self.out_layer = nn.Linear(mlp_size, 256, bias=False)
@@ -81,7 +83,7 @@ def score(reward, cont, value, discount=0.997, lamb_da=0.95):
            act                act0                   act1                  act2                   act3
         r  reward[1:]         rew1                   rew2                  rew3
         c  cont[1:] * disc    con1 * disc            con2 * disc           con3 * disc
-        v  val[:-1]           val1                   val2                  val3
+        v  val[1:]            val1                   val2                  val3
 
         t  temp_diff          r1 + c1 * v1 * (1-l)   r1 + c1 * v1 * (1-l)  r1 + c1 * v1 * (1-l)
 
@@ -99,9 +101,14 @@ def score(reward, cont, value, discount=0.997, lamb_da=0.95):
     assert len(reward) == len(value) - 1
     disc = cont * discount
     vals = [value[-1]]
-    interm = reward + disc * value[1:] * (1 - lamb_da)
+
+    # interm = reward + disc * value[1:] * (1 - lamb_da)
+    # for t in reversed(range(len(disc))):
+    #     vals.append(interm[t] + disc[t] * lamb_da * vals[-1])
+    #
+    # interm = reward + disc * value[1:] * (1 - lamb_da)
     for t in reversed(range(len(disc))):
-        vals.append(interm[t] + disc[t] * lamb_da * vals[-1])
+        vals.append(reward[t] + disc[t] * ((1 - lamb_da) * value[t + 1] + lamb_da * vals[-1]))
     ret = torch.stack(list(reversed(vals))[:-1])
     return ret, value[:-1]
 
@@ -131,6 +138,7 @@ class CriticLoss:
             'ac_critic_loss_reg': self.loss_reg.mean().detach().cpu(),
             'ac_critic_loss': self.loss.mean().detach().cpu()
         }
+
 
 class Moment:
     def __init__(self, decay):
@@ -168,7 +176,7 @@ class ActorLoss:
         self.loss = self.loss.mean()
         return self.loss
 
-    def log_dict(self):
+    def log_scalars(self):
         return {
             'ac_actor_loss_perc_5': self.perc_5.value,
             'ac_actor_loss_perc_95': self.perc_95.value,
@@ -183,8 +191,14 @@ class ActorLoss:
             'ac_actor_loss': self.loss.detach().cpu(),
         }
 
+    def log_distributions(self):
+        return {
+            'ac_actor_loss_advantage': self.adv.detach().cpu().numpy(),
+        }
+
 
 def polyak_update(critic, ema_critic, critic_ema_decay=0.98):
+
     """
 
     :param critic: critic to source the weights from (ie the critic we are training with grad descent)
@@ -198,7 +212,7 @@ def polyak_update(critic, ema_critic, critic_ema_decay=0.98):
 
 
 class ActorCriticTrainer(nn.Module):
-    def __init__(self, actor, critic, lr=3e-5, adam_eps=1e-5, grad_clip=100., device='cuda'):
+    def __init__(self, actor, critic, lr=3e-5, adam_eps=1e-5, grad_clip=100., device='cpu'):
         super().__init__()
         self.actor_criterion = ActorLoss()
         self.critic_criterion = CriticLoss()
@@ -240,11 +254,12 @@ class ActorCriticTrainer(nn.Module):
 
     def log_scalars(self):
         with torch.no_grad():
-            actor_criterion_log = self.actor_criterion.log_dict()
+            actor_criterion_log = self.actor_criterion.log_scalars()
             critic_criterion_log = self.critic_criterion.log_dict()
             return {**actor_criterion_log, **critic_criterion_log}
 
     def log_distributions(self):
+        actor_criterion_dist = self.actor_criterion.log_distributions()
         return {
             'ac_rewards': self.rewards.detach().cpu(),
             'ac_critic_mean': self.critic_dist.mean.detach().cpu(),
@@ -253,7 +268,8 @@ class ActorCriticTrainer(nn.Module):
             'ac_values': self.values.detach().cpu(),
             'ac_actions': self.action.detach().cpu(),
             'ac_action_dist_mean': self.action_dist.mean.detach().cpu(),
-            'ac_cont': self.cont.detach().cpu()
+            'ac_cont': self.cont.detach().cpu(),
+            **actor_criterion_dist
         }
 
 
@@ -261,6 +277,7 @@ if __name__ == '__main__':
     config_horizon = 333
     discount = 1 - 1 / config_horizon
 
+    import time
     from replay import Step
     import replay
     from torch.optim import Adam
@@ -273,6 +290,7 @@ if __name__ == '__main__':
     from matplotlib import pyplot as plt
     import wandb
     from multiprocessing import Process
+    from torch.linalg import norm
 
     plt.ion()
     torch.manual_seed(0)
@@ -288,11 +306,11 @@ if __name__ == '__main__':
             super().__init__()
             self.table = nn.Parameter(torch.zeros(*obs_shape))
 
-        def forward(self, observation):
+        def forward(self, observation, *args):
             L, N, _ = observation.shape
             observation = observation.flatten(0, 1)
             x, y = observation[:, 0], observation[:, 1]
-            return Normal(loc=self.table[x, y].unflatten(0, (L, N, 1)), scale=1.)
+            return Normal(loc=self.table[x, y].unflatten(0, (L, N)), scale=1.)
 
 
     class ActorTable(nn.Module):
@@ -301,7 +319,7 @@ if __name__ == '__main__':
             shape = obs_shape + (action_shape,)
             self.table = nn.Parameter(torch.zeros(*shape))
 
-        def forward(self, observation):
+        def forward(self, observation, *args):
             L, N, _ = observation.shape
             observation = observation.flatten(0, 1)
             x, y = observation[:, 0], observation[:, 1]
@@ -312,24 +330,24 @@ if __name__ == '__main__':
         return torch.tensor([obs[0][0], obs[0][1]], dtype=torch.long)
 
 
-    def rollout(env, actor, pad_action):
+    def rollout(roll_env, roll_actor, pad_action):
 
-        obs, info = env.reset()
+        obs, info = roll_env.reset()
         obs_prepro = prepro(obs)
         reward, terminated, truncated = 0.0, False, False
 
         while True:
-            action = actor(obs_prepro.unsqueeze(0).unsqueeze(0)).sample().item()
+            action = roll_actor(obs_prepro.unsqueeze(0).unsqueeze(0)).sample().item()
 
             yield Step(obs_prepro, np.array([action]), reward, terminated, truncated)
 
-            obs, reward, terminated, truncated, info = env.step(action)
+            obs, reward, terminated, truncated, info = roll_env.step(action)
             obs_prepro = prepro(obs)
 
             if terminated or truncated:
                 yield Step(obs_prepro, pad_action, reward, terminated, truncated)
 
-                obs, info = env.reset()
+                obs, info = roll_env.reset()
                 obs_prepro = prepro(obs)
                 reward, terminated, truncated = 0.0, False, False
 
@@ -337,12 +355,9 @@ if __name__ == '__main__':
     pad_action = np.array([0])
 
     critic = CriticTable(obs_shape=env.observation_space.shape)
-    ema_critic = deepcopy(critic)
-    opt = Adam(critic.parameters(), lr=1e-2)
-
     actor = ActorTable(obs_shape=env.observation_space.shape, action_shape=env.action_space.n.item())
-    opt_actor = Adam(actor.parameters(), lr=1e-2)
     display_actor = deepcopy(actor)
+    trainer = ActorCriticTrainer(actor, critic, lr=3e-3)
 
     batch_size = 128
     batch_length = 16
@@ -364,23 +379,24 @@ if __name__ == '__main__':
 
     total_steps = 0
 
-    returns_5th = Moment(decay=0.99)
-    returns_95th = Moment(decay=0.99)
-
     loader = replay.BatchLoader()
 
     fig, ax = plt.subplots()
     plt.show()
 
+
     def run_display(process_name):
         display_env = gymnasium.make(env_name)
         display_actor = ActorTable(obs_shape=env.observation_space.shape, action_shape=env.action_space.n.item())
-        display_actor.load_state_dict(torch.load('actor.pt'))
+        if pathlib.Path('actor.pt').exists():
+            display_actor.load_state_dict(torch.load('actor.pt'))
         runner = rollout(display_env, display_actor, pad_action)
         while True:
             step = next(runner)
+            time.sleep(0.1)
             if step.is_terminal:
-                display_actor.load_state_dict(torch.load('actor.pt'))
+                if pathlib.Path('actor.pt').exists():
+                    display_actor.load_state_dict(torch.load('actor.pt'))
 
 
     p = Process(target=run_display, args=('bob',))
@@ -389,7 +405,8 @@ if __name__ == '__main__':
     for step in range(20000):
 
         buff, tj_len, tj_rewards = on_policy(rollout(env, actor, pad_action))
-        print(f'rewards mean: {mean(tj_rewards)}, stdev: {stdev(tj_rewards)} length mean: {mean(tj_len)}, stdev: {stdev(tj_len)}')
+        print(
+            f'rewards mean: {mean(tj_rewards)}, stdev: {stdev(tj_rewards)} length mean: {mean(tj_len)}, stdev: {stdev(tj_len)}')
         wandb.log({
             'tj_rewards': mean(tj_rewards),
             'tj_len': mean(tj_len)
@@ -399,27 +416,7 @@ if __name__ == '__main__':
         obs, act, reward, cont = loader.sample(buff, batch_length, batch_size)
         obs = obs.long()
 
-        critic_dist = critic(obs)
-        returns, values = score(reward, cont, critic_dist.mean)
-        returns_5th.update(torch.quantile(returns, 0.05, interpolation='higher'))
-        returns_95th.update(torch.quantile(returns, 0.95, interpolation='lower'))
-        tw = traj_weight(cont)
-
-        critic_dist = critic(obs[:-1])
-        ema_critic_dist = ema_critic(obs[:-1])
-        crit_loss = critic_loss(returns, critic_dist, ema_critic_dist, tw[:-1])
-
-        opt.zero_grad()
-        crit_loss.backward()
-        opt.step()
-        polyak_update(critic, ema_critic)
-
-        action_dist = actor(obs)
-
-        act_loss = actor_loss(returns, returns_5th.value, returns_95th.value, values, action_dist, act, tw)
-        opt_actor.zero_grad()
-        act_loss.backward()
-        opt_actor.step()
+        trainer.train_step(obs, obs, act, reward, cont)
 
         direction = actor.table.argmax(-1)
         arrows = env.get_action_meanings()
@@ -449,20 +446,28 @@ if __name__ == '__main__':
         max_direction = actor_probs.argmax(-1).flatten()
         colormap = matplotlib.cm.bwr
 
-        color = colormap((max_direction == 0) * 1.)
-        u, v = torch.zeros_like(x), -actor_probs[:, :, 0].detach().flatten()
-        ax.quiver(x, y, u, v, angles='xy', color=color)
-
-        color = colormap((max_direction == 2) * 1.)
-        u, v = torch.zeros_like(x), actor_probs[:, :, 2].detach().flatten()
-        ax.quiver(x, y, u, v, angles='xy', color=color)
-
         color = colormap((max_direction == 1) * 1.)
-        u, v = actor_probs[:, :, 1].detach().flatten(), torch.zeros_like(y)
+        u, v = torch.zeros_like(x), -actor_probs[:, :, 1].detach().flatten()
+        mag = (u ** 2 + v ** 2) ** 0.5
+        u, v = u/mag/4, v / mag/4
         ax.quiver(x, y, u, v, angles='xy', color=color)
 
         color = colormap((max_direction == 3) * 1.)
-        u, v = - actor_probs[:, :, 3].detach().flatten(), torch.zeros_like(y)
+        u, v = torch.zeros_like(x), actor_probs[:, :, 3].detach().flatten()
+        mag = (u ** 2 + v ** 2) ** 0.5
+        u, v = u/mag/4, v / mag/4
+        ax.quiver(x, y, u, v, angles='xy', color=color)
+
+        color = colormap((max_direction == 2) * 1.)
+        u, v = actor_probs[:, :, 2].detach().flatten(), torch.zeros_like(y)
+        mag = (u ** 2 + v ** 2) ** 0.5
+        u, v = u/mag/4, v / mag/4
+        ax.quiver(x, y, u, v, angles='xy', color=color)
+
+        color = colormap((max_direction == 4) * 1.)
+        u, v = - actor_probs[:, :, 4].detach().flatten(), torch.zeros_like(y)
+        mag = (u ** 2 + v ** 2) ** 0.5
+        u, v = u/mag/4, v / mag/4
         ax.quiver(x, y, u, v, angles='xy', color=color)
 
         plt.pause(0.1)

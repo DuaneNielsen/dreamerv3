@@ -33,12 +33,13 @@ from blocks import MLPBlock, ModernDecoderConvBlock, Embedder, DecoderConvBlock
 
 
 class Encoder(nn.Module):
-    def __init__(self, cnn_multi=32, mlp_layers=2, mlp_hidden=512, h_size=512):
+    def __init__(self, cnn_multi=32, mlp_hidden=640, h_size=512):
         super().__init__()
         self.encoder = nn.Sequential(
             nn.Linear(4 * 4 * cnn_multi * 2 ** 3 + h_size, mlp_hidden, bias=False),
-            *[MLPBlock(mlp_hidden, mlp_hidden) for _ in range(mlp_layers)],
-            nn.Linear(mlp_hidden, 32 * 32, bias=False),
+            nn.LayerNorm([mlp_hidden]),
+            nn.SiLU(),
+            nn.Linear(mlp_hidden, 32 * 32, bias=True),
             nn.Unflatten(1, (32, 32))
         )
 
@@ -55,12 +56,13 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, out_channels=3, cnn_multi=32, mlp_layers=2, mlp_hidden=512, h_size=512, z_size=32, z_cls=32):
+    def __init__(self, out_channels=3, cnn_multi=32, mlp_hidden=640, h_size=512, z_size=32, z_cls=32):
         super().__init__()
         self.decoder = nn.Sequential(
             nn.Linear(z_cls * z_size + h_size, mlp_hidden, bias=False),
-            *[MLPBlock(mlp_hidden, mlp_hidden) for _ in range(mlp_layers)],
-            nn.Linear(mlp_hidden, 4 * 4 * cnn_multi * 2 ** 3, bias=False),
+            nn.LayerNorm([mlp_hidden]),
+            nn.SiLU(),
+            nn.Linear(mlp_hidden, 4 * 4 * cnn_multi * 2 ** 3, bias=True),
             nn.Unflatten(-1, (cnn_multi * 2 ** 3, 4, 4)),
             DecoderConvBlock(cnn_multi * 2 ** 2, 8, 8, cnn_multi * 2 ** 3),
             DecoderConvBlock(cnn_multi * 2 ** 1, 16, 16, cnn_multi * 2 ** 2),
@@ -109,12 +111,13 @@ class ModernDecoder(nn.Module):
 
 
 class DynamicsPredictor(nn.Module):
-    def __init__(self, h_size=512, mlp_size=512, mlp_layers=2, z_size=32, z_cls=32):
+    def __init__(self, h_size=512, mlp_size=640, z_size=32, z_cls=32):
         super().__init__()
         self.dynamics_predictor = nn.Sequential(
-            MLPBlock(h_size, mlp_size),
-            *[MLPBlock(mlp_size, mlp_size) for _ in range(mlp_layers - 1)],
-            nn.Linear(mlp_size, z_size * z_cls, bias=False)
+            nn.Linear(h_size, mlp_size, bias=False),
+            nn.LayerNorm([mlp_size]),
+            nn.SiLU(),
+            nn.Linear(mlp_size, z_size * z_cls, bias=True),
         )
         self.z_size = z_size
         self.z_cls = z_cls
@@ -177,7 +180,7 @@ class RSSM(nn.Module):
          Dynamics predictor    zpost ~ p ( zpost | h )
          Reward predictor:     r ~ p( z | h )
          Continue predictor:   c ~ p( z | h )
-         Decoder:              x ~ p( x | h, z )\ 
+         Decoder:              x ~ p( x | h, z )\
         """
 
         self.h_size = h_size
@@ -244,13 +247,13 @@ class RSSM(nn.Module):
             z_list += [OneHotCategoricalStraightThru(logits=z_logit_list[t]).sample()]
 
         h = torch.stack(h_list)
-        z_prior_logits = torch.stack(z_logit_list)
-        z = torch.stack(z_list)
+        z_post_logits = torch.stack(z_logit_list)
+        z_post = torch.stack(z_list)
 
-        x_dist = self.decoder(h, z)
-        z_post_logits = self.dynamics_pred(h)
-        reward_probs = self.reward_pred(h, z)
-        continue_dist = self.continue_pred(h, z)
+        x_dist = self.decoder(h, z_post)
+        z_prior_logits = self.dynamics_pred(h)
+        reward_probs = self.reward_pred(h, z_post)
+        continue_dist = self.continue_pred(h, z_post)
 
         return x_dist, reward_probs, continue_dist, z_prior_logits, z_post_logits
 
@@ -370,8 +373,8 @@ class RSSMLoss:
         self.loss_obs = - obs_dist.log_prob(obs).flatten(start_dim=2).mean(-1)
         self.loss_reward = - reward_dist.log_prob(rewards.squeeze(-1))
         self.loss_cont = - cont_dist.log_prob(cont).squeeze(-1)
-        self.loss_dyn = 0.5 * categorical_kl_divergence_clamped(z_prior_logits.detach(), z_post_logits).mean(-1)
-        self.loss_rep = 0.1 * categorical_kl_divergence_clamped(z_prior_logits, z_post_logits.detach()).mean(-1)
+        self.loss_dyn = 0.5 * categorical_kl_divergence_clamped(z_post_logits.detach(), z_prior_logits).mean(-1)
+        self.loss_rep = 0.1 * categorical_kl_divergence_clamped(z_post_logits, z_prior_logits.detach()).mean(-1)
         self.loss = self.loss_obs + self.loss_reward + self.loss_cont + self.loss_dyn + self.loss_rep
         self.loss = self.loss.mean()
         return self.loss
