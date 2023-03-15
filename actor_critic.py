@@ -146,7 +146,7 @@ class ActorLoss:
         self.offset = 0.
         self.invscale = 1.
 
-    def __call__(self, action_dist, action, returns, base, cont, entropy_scale=-3e-4):
+    def __call__(self, action_dist, action, returns, base, cont, entropy_scale=3e-4):
         self.perc_5.update(torch.quantile(returns, 0.05, interpolation='higher'))
         self.perc_95.update(torch.quantile(returns, 0.95, interpolation='lower'))
         traj_wgt = traj_weight(cont)
@@ -157,8 +157,8 @@ class ActorLoss:
         self.adv = self.normed_ret - self.normed_base
         self.logpi = action_dist.log_prob(action.detach())[:-1]
         self.loss_policy_grad = -self.logpi * self.adv.detach()
-        ent = action_dist.entropy()[:-1]
-        self.loss_ent = - entropy_scale * ent
+        self.ent = action_dist.entropy()[:-1]
+        self.loss_ent = - entropy_scale * self.ent
         self.loss = self.loss_policy_grad + self.loss_ent
         self.loss *= traj_wgt.detach()[:-1]
         self.loss = self.loss.mean()
@@ -175,6 +175,7 @@ class ActorLoss:
             'ac_actor_loss_adv': self.adv.mean().detach().cpu(),
             'ac_actor_loss_logpi': self.logpi.mean().detach().cpu(),
             'ac_actor_loss_policy_grad': self.loss_policy_grad.mean().detach().cpu(),
+            'ac_actor_loss_entropy': self.ent.mean().detach().cpu(),
             'ac_actor_loss_loss_ent': self.loss_ent.mean().detach().cpu(),
             'ac_actor_loss': self.loss.detach().cpu(),
         }
@@ -182,6 +183,7 @@ class ActorLoss:
     def log_distributions(self):
         return {
             'ac_actor_loss_advantage': self.adv.detach().cpu().numpy(),
+            'ac_actor_loss_entropy_dist': self.ent.detach().cpu().numpy(),
         }
 
 
@@ -254,8 +256,8 @@ class ActorCriticTrainer(nn.Module):
             'ac_ema_critic_mean': self.ema_critic_dist.mean.detach().cpu(),
             'ac_returns': self.returns.detach().cpu(),
             'ac_values': self.values.detach().cpu(),
-            'ac_actions': self.action.detach().cpu(),
-            'ac_action_dist_mean': self.action_dist.mean.detach().cpu(),
+            'ac_actions': self.action.argmax(-1).detach().cpu(),
+            'ac_action_dist_argmax': self.action_dist.logits.argmax(-1).detach().cpu(),
             'ac_cont': self.cont.detach().cpu(),
             **actor_criterion_dist
         }

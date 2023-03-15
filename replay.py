@@ -136,8 +136,11 @@ class BatchLoader:
         reward = torch.from_numpy(reward).to(device=self.device, dtype=torch.float32)
         cont = torch.from_numpy(cont).to(device=self.device, dtype=torch.float32)
 
+        observation.requires_grad = True
+        action.requires_grad = True
+        reward.requires_grad = True
+        cont.requires_grad = True
         return observation, action, reward, cont
-
 
 def get_trajectories(buff, max_trajectories=None):
     offset = 0

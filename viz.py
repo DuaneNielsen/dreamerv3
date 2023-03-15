@@ -164,6 +164,11 @@ class VizAction:
         return make_caption(action_caption)
 
 
+def normalized_image(observation):
+    obs = observation / np.max(observation) * 255
+    return obs.astype(np.uint8)
+
+
 class VizStep:
     def __init__(self, action_meanings=None, hw=None):
         self.viz_action = VizAction(action_meanings)
@@ -171,9 +176,7 @@ class VizStep:
         self.hooks = []
 
     def observation(self, step):
-        obs = step.observation / np.max(step.observation) * 255
-        obs = obs.astype(np.uint8)
-        return obs
+        return normalized_image(step.observation)
 
     def action(self, step):
         return self.viz_action(step.action)
@@ -232,29 +235,3 @@ def make_panel(obs, action, reward, cont, value=None, action_meanings=None, nrow
         return make_grid(torch.zeros(1, 3, 64, 64))
 
     return make_grid(panel, nrow)
-
-
-def decode_trajectory(rssm, latest_trajectory, critic, prepro_obs):
-    observations, actions, rewards, cont, value = [], [], [], [], []
-    h = rssm.new_hidden0(batch_size=1)
-    # obs = prepro_obs(latest_trajectory[0].observation).to(rssm.device).unsqueeze(0)
-    # action = torch.from_numpy(latest_trajectory[0].action).unsqueeze(0).to(rssm.device)
-    # observations += [rssm.decoder(h, z).mode]
-    # actions += [action]
-    # rewards += [rssm.reward_pred(h, z).mean]
-    # cont += [rssm.continue_pred(h, z).mean]
-    # value += [critic(h, z).mean.unsqueeze(-1)]
-
-    for i, step in enumerate(list(latest_trajectory)):
-        real_obs = prepro_obs(step.observation).to(rssm.device).unsqueeze(0)
-        action = torch.from_numpy(step.action).unsqueeze(0).to(rssm.device)
-        if i == 0:
-            z = rssm.encode_observation(h, real_obs)
-        observations += [rssm.decoder(h, z).mode]
-        actions += [action]
-        rewards += [rssm.reward_pred(h, z).mean]
-        cont += [rssm.continue_pred(h, z).mean]
-        value += [critic(h, z).mean.unsqueeze(-1)]
-        h, z = rssm.step_reality(h, real_obs, action)
-
-    return torch.stack(observations), torch.stack(actions), torch.stack(rewards), torch.stack(cont), torch.stack(value)

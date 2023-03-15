@@ -1,12 +1,14 @@
 import gymnasium
+from torchvision.transforms.functional import to_tensor
+from torch.nn.functional import one_hot
 from gridworlds.simpler_gridworld import PartialRGBObservationWrapper
 
 import replay
 from gridworlds.wrappers import OneHotActionWrapper, MaxCombineObservations
 from replay import BatchLoader, Step
 from collections import deque
-from torchvision.transforms.functional import to_tensor
-from rssm import make_small, RSSMLoss, make_small_gridworld
+
+from rssm import make_small, RSSMLoss
 from actor_critic import Actor, Critic, ActorCriticTrainer
 import torch
 import torch.nn as nn
@@ -14,6 +16,8 @@ from torch.optim import Adam
 from argparse import ArgumentParser
 import utils
 import wandb
+
+from train_grid import viz_reward_pred, viz_cont_pred
 from utils import register_gradient_clamp
 from viz import visualize_buff, VizStep, ValueHook
 from wandb.data_types import Video
@@ -21,31 +25,8 @@ import viz
 import gridworlds.gridworld as gridworld
 import numpy as np
 from torchvision.utils import make_grid
-
-
-def rollout(env, actor, rssm, pad_action):
-    obs, info = env.reset()
-    h = rssm.new_hidden0(batch_size=1)
-    obs_tensor = to_tensor(obs).to(rssm.device).unsqueeze(0)
-    z = rssm.encode_observation(h, obs_tensor).mode
-    reward, terminated, truncated = 0.0, False, False
-
-    while True:
-        action = actor(h, z).sample()
-        yield Step(obs, action[0].detach().cpu().numpy(), reward, terminated, truncated)
-
-        obs, reward, terminated, truncated, info = env.step(action[0].cpu())
-        obs_tensor = to_tensor(obs).to(rssm.device).unsqueeze(0)
-        h, z = rssm.step_reality(h, obs_tensor, action)
-
-        if terminated or truncated:
-            yield Step(obs, pad_action, reward, terminated, truncated)
-
-            obs, info = env.reset()
-            obs_tensor = to_tensor(obs).to(rssm.device).unsqueeze(0)
-            h = rssm.new_hidden0(batch_size=1)
-            z = rssm.encode_observation(h, obs_tensor).mode
-            reward, terminated, truncated = 0.0, False, False
+from copy import deepcopy
+from math import ceil
 
 
 class WorldModelTrainer(nn.Module):
@@ -75,10 +56,12 @@ class WorldModelTrainer(nn.Module):
     def log_images(self, vizualiser):
         with torch.no_grad():
             viz_batch_gt_buff = replay.unstack_batch(self.obs[0:8, 0:8], self.action[0:8, 0:8], self.reward[0:8, 0:8], self.cont[0:8, 0:8])
-            viz_batch_pred_buff = replay.unstack_batch(self.obs_dist.mean[0:8, 0:8], self.action[0:8, 0:8], self.reward_dist.mean[0:8, 0:8], self.cont_dist.mean[0:8, 0:8])
+            viz_batch_pred_buff = replay.unstack_batch(self.obs_dist.mean[0:8, 0:8], self.action[0:8, 0:8], self.reward_dist.mean[0:8, 0:8],
+                                                       self.cont_dist.mean[0:8, 0:8])
             viz_batch_gt = visualize_buff(viz_batch_gt_buff, vizualiser)
             viz_batch_pred = visualize_buff(viz_batch_pred_buff, vizualiser)
-            batch_panel = torch.cat((make_grid(torch.from_numpy(viz_batch_gt)), make_grid(torch.from_numpy(viz_batch_pred))), dim=2).numpy().transpose(1, 2, 0)
+            batch_panel = torch.cat((make_grid(torch.from_numpy(viz_batch_gt)), make_grid(torch.from_numpy(viz_batch_pred))),
+                                    dim=2).numpy().transpose(1, 2, 0)
             viz_gt_buff = replay.unstack_batch(self.obs, self.action, self.reward, self.cont)
             viz_pred_buff = replay.unstack_batch(self.obs_dist.mean, self.action, self.reward_dist.mean, self.cont_dist.mean)
 
@@ -116,12 +99,52 @@ class WorldModelTrainer(nn.Module):
         }
 
 
+class Rollout:
+    def __init__(self, env, actor, rssm, pad_action):
+        self.actor = actor
+        self.rssm = rssm
+        self.env = env
+        self.pad_action = pad_action
+        self.terminated = True
+        self.truncated = False
+        self.h = None
+        self.action = None
+
+    def step(self, action=None):
+        with torch.no_grad():
+            if self.terminated or self.truncated:
+                obs, info = self.env.reset()
+                self.h = self.rssm.new_hidden0(batch_size=1)
+                obs_tensor = to_tensor(obs).to(self.rssm.device).unsqueeze(0)
+                z = self.rssm.encode_observation(self.h, obs_tensor).mode
+                r_pred, c_pred, obs_pred = self.rssm.reward_pred(self.h, z), self.rssm.continue_pred(self.h, z), self.rssm.decoder(self.h, z)
+                reward, self.terminated, self.truncated = 0.0, False, False
+
+                self.action = action if action is not None else self.actor(self.h, z).sample()
+                return Step(obs, self.action[0].detach().cpu().numpy(), reward, self.terminated, self.truncated,
+                           reward_pred=r_pred.mean.detach().cpu().numpy(), cont_pred=c_pred.probs.detach().cpu().numpy(),
+                           obs_pred=obs_pred.mode[0].permute(1, 2, 0).detach().cpu().numpy())
+
+            else:
+                obs, reward, self.terminated, self.truncated, info = self.env.step(self.action[0].cpu())
+                obs_tensor = to_tensor(obs).to(self.rssm.device).unsqueeze(0)
+                self.h, z, r_pred, c_pred, obs_pred = self.rssm.step_reality(self.h, obs_tensor, self.action)
+
+                r_pred, c_pred, obs_pred = self.rssm.reward_pred(self.h, z), self.rssm.continue_pred(self.h, z), self.rssm.decoder(self.h, z)
+                self.action = action if action is not None else self.actor(self.h, z).sample()
+                return Step(obs, pad_action, reward, self.terminated, self.truncated,
+                           reward_pred=r_pred.mean.detach().cpu().numpy(), cont_pred=c_pred.probs.detach().cpu().numpy(),
+                           obs_pred=obs_pred.mode[0].permute(1, 2, 0).detach().cpu().numpy())
+
+
 if __name__ == '__main__':
 
     parser = ArgumentParser()
-    parser.add_argument('--train_ratio', type=int, default=512)
+    parser.add_argument('--train_ratio', type=int, default=32)
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--batch_length', type=int, default=64)
+    parser.add_argument('--imagination_horizon', type=int, default=15)
+    parser.add_argument('--imagination_batch_size', type=int, default=32)
     parser.add_argument('--replay_capacity', type=int, default=10 ** 6)
     parser.add_argument('--world_model_learning_rate', type=float, default=1e-4)
     parser.add_argument('--world_model_adam_epsilon', type=float, default=1e-8)
@@ -129,7 +152,6 @@ if __name__ == '__main__':
     parser.add_argument('--actor_critic_learning_rate', type=float, default=3e-5)
     parser.add_argument('--actor_critic_adam_epsilon', type=float, default=1e-5)
     parser.add_argument('--actor_critic_gradient_clipping', type=float, default=100.)
-    parser.add_argument('--imagination_horizon', type=int, default=15)
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--resume', type=str, default=None)
     parser.add_argument('--log_every_n_steps', type=int, default=2000)
@@ -169,6 +191,18 @@ if __name__ == '__main__':
     pad_action = np.zeros((1, env.action_space.n.item()))
     pad_action[:, 0] = 1.
     action_table = env.get_action_meanings()
+    visualizer_traj = VizStep(action_meanings=action_table)
+
+    def vizualize_obs_pred(step):
+        return viz.normalized_image(step.info['obs_pred'])
+
+    visualizer_traj.add_hook(vizualize_obs_pred)
+    visualizer_traj.add_hook(viz_reward_pred)
+    visualizer_traj.add_hook(viz_cont_pred)
+    visualizer_traj.add_hook(ValueHook())
+
+    vizualizer = VizStep(action_meanings=action_table)
+    vizualizer.add_hook(ValueHook())
 
     rssm = make_small(action_classes=env.action_space.n.item(), decoder=args.decoder).to(args.device)
 
@@ -178,6 +212,10 @@ if __name__ == '__main__':
                                             grad_clip=args.world_model_gradient_clipping)
     critic = Critic()
     actor = Actor(action_size=1, action_classes=env.action_space.n.item())
+
+    rssm_policy = deepcopy(rssm).cpu()
+    actor_policy = deepcopy(actor).cpu()
+
     actor_critic_trainer = ActorCriticTrainer(
         actor=actor,
         critic=critic,
@@ -188,10 +226,11 @@ if __name__ == '__main__':
     )
 
     buff = deque(maxlen=args.replay_capacity)
-    gen = rollout(env, actor, rssm, pad_action)
+    gen = Rollout(env, actor_policy, rssm_policy, pad_action)
 
-    for i in range(400):
-        buff += [next(gen)]
+    for i in range(args.batch_length * args.batch_size):
+        random_action = one_hot(torch.tensor([env.action_space.sample()]), env.action_space.n).unsqueeze(0)
+        buff += [gen.step(random_action)]
 
     if args.resume:
         checkpoint = torch.load(args.resume)
@@ -204,61 +243,59 @@ if __name__ == '__main__':
 
     for step in range(args.max_steps):
 
-        buff += [next(gen)]
+        buff += [gen.step()]
+        if buff[-1].is_terminal:
+            latest_trajectory = replay.get_tail_trajectory(buff)
+            trajectory_reward = replay.total_reward(latest_trajectory)
+            trajectory_reward_pred = replay.sum_key(latest_trajectory, 'reward_pred')
+            trajectory_viz = viz.visualize_buff(latest_trajectory, visualizer=visualizer_traj)
+
+            wandb.log({
+                'trajectory_reward_pred': trajectory_reward_pred,
+                'trajectory_reward': trajectory_reward,
+                'trajectory_length': len(latest_trajectory),
+                'trajectory_viz': Video(trajectory_viz)
+            }, step=step)
+
+            print(f'trajectory end: reward {trajectory_reward} reward pred: {trajectory_reward_pred} len: {len(latest_trajectory)}')
+
+        if step % ceil(args.imagination_horizon * args.imagination_batch_size / args.train_ratio) != 0:
+            continue
+
         obs, action, reward, cont = loader.sample(buff, args.batch_length, args.batch_size)
         world_model_trainer.train_model(obs, action, reward, cont)
 
-        imag_batch_size = int(args.train_ratio / args.imagination_horizon)
-        obs, act, reward, cont = loader.sample(buff, batch_length=1, batch_size=imag_batch_size)
-        h0 = rssm.new_hidden0(imag_batch_size)
+        obs, act, reward, cont = loader.sample(buff, batch_length=1, batch_size=args.imagination_batch_size)
+        h0 = rssm.new_hidden0(args.imagination_batch_size)
         imag_h, imag_z, imag_action, imag_rewards, imag_cont = \
             rssm.imagine(h0, obs[0], reward[0], cont[0], actor, imagination_horizon=args.imagination_horizon)
 
         actor_critic_trainer.train_step(imag_h, imag_z, imag_action, imag_rewards, imag_cont)
 
+        rssm_policy.load_state_dict(rssm.state_dict())
+        actor_policy.load_state_dict(actor.state_dict())
+
         wandb.log({**actor_critic_trainer.log_scalars(), **world_model_trainer.log_scalars()}, step=step)
         wandb.log({k: wandb.Histogram(v) for k, v in actor_critic_trainer.log_distributions().items()}, step=step)
         wandb.log({k: wandb.Histogram(v) for k, v in world_model_trainer.log_distributions().items()}, step=step)
 
-        if buff[-1].is_terminal:
-
-            def prepro_image(observation):
-                return torch.from_numpy(observation).permute(2, 0, 1) / 255.
-
-            vizualizer = VizStep(action_meanings=action_table)
-            vizualizer.add_hook(ValueHook())
-            latest_trajectory = replay.get_tail_trajectory(buff)
-            trajectory_reward = replay.total_reward(latest_trajectory)
-            trajectory_viz = viz.visualize_buff(latest_trajectory, visualizer=vizualizer)
-            dec_trajectory = viz.decode_trajectory(rssm, latest_trajectory, critic, prepro_image)
-            dec_buff = replay.unstack_batch(*dec_trajectory[0:-1], value=dec_trajectory[-1])
-
-            dec_trajectory_viz = viz.visualize_buff(dec_buff, visualizer=vizualizer)
-            side_by_side = np.concatenate((trajectory_viz, dec_trajectory_viz), axis=3)
-
-            wandb.log({
-                'trajectory_reward': trajectory_reward,
-                'trajectory_length': len(latest_trajectory),
-                'trajectory_viz': Video(side_by_side)
-            }, step=step)
-
-            print(f'trajectory end: reward {trajectory_reward} len: {len(latest_trajectory)}')
-
         if step % args.log_every_n_steps == 0:
-            vizualizer = VizStep(action_meanings=action_table)
-            wandb.log({k: wandb.Image(v) for k, v in world_model_trainer.log_images(vizualizer).items()}, step=step)
+            print('logging step')
+            with torch.no_grad():
+                vizualizer = VizStep(action_meanings=action_table)
+                wandb.log({k: wandb.Image(v) for k, v in world_model_trainer.log_images(vizualizer).items()}, step=step)
 
-            imag_obs = rssm.decoder(imag_h, imag_z).mean
-            imag_returns = actor_critic_trainer.log_distributions()['ac_returns'].to(args.device)
-            imagined_trajectory_viz = viz.visualize_imagined_trajectories(
-                imag_obs[:-1, :], imag_action[:-1, :], imag_rewards[:-1, :], imag_cont[:-1, :],
-                imag_returns[:, :],visualizer=vizualizer)
+                imag_obs = rssm.decoder(imag_h, imag_z).mean
+                imag_returns = actor_critic_trainer.log_distributions()['ac_returns'].to(args.device)
+                imagined_trajectory_viz = viz.visualize_imagined_trajectories(
+                    imag_obs[:-1, :], imag_action[:-1, :], imag_rewards[:-1, :], imag_cont[:-1, :],
+                    imag_returns[:, :], visualizer=vizualizer)
 
-            wandb.log({'ac_imagined_trajectory': wandb.Video(imagined_trajectory_viz)}, step=step)
+                wandb.log({'ac_imagined_trajectory': wandb.Video(imagined_trajectory_viz)}, step=step)
 
-            torch.save({
-                'args': args,
-                'step': step,
-                'actor_critic_trainer_state_dict': actor_critic_trainer.state_dict(),
-                'world_model_state_dict': world_model_trainer.state_dict(),
-            }, run_dir + '/checkpoint.pt')
+                torch.save({
+                    'args': args,
+                    'step': step,
+                    'actor_critic_trainer_state_dict': actor_critic_trainer.state_dict(),
+                    'world_model_state_dict': world_model_trainer.state_dict(),
+                }, run_dir + '/checkpoint.pt')

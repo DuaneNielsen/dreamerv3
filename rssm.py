@@ -23,38 +23,58 @@
  During prediction z = zpost
 
 """
-
+import numpy as np
 import torch
 import torch.nn as nn
+from torch import nn as nn
 from torch.distributions import Normal, Bernoulli, OneHotCategorical, Categorical
+from torchvision.utils import make_grid
+
+import replay
 from dists import OneHotCategoricalStraightThru, categorical_kl_divergence_clamped, TwoHotSymlog, \
     OneHotCategoricalUnimix
 from blocks import MLPBlock, ModernDecoderConvBlock, Embedder, DecoderConvBlock
 from torch.nn.functional import one_hot
 
+from utils import register_gradient_clamp
+from viz import visualize_buff
+
 
 class GridworldPosEncoder(nn.Module):
-    def __init__(self):
+    def __init__(self, h_size=512, z_size=32, z_cls=32):
         super().__init__()
+        self.z_cls, self.z_size = z_cls, z_size
+        self.scaler = nn.Linear(z_size * z_cls + h_size, z_size * z_cls, bias=True)
 
     def forward(self, h, e):
         if len(e.shape) == 3:
             T, N = e.shape[0:2]
+            indices = torch.zeros(T, N, 32, dtype=torch.long, device=h.device)
+            indices[torch.arange(T), torch.arange(N), 0:2] = e[torch.arange(N)].long()
+            indices[torch.arange(T), torch.arange(N), 2:] = 1
         else:
-            T, N = 1, e.shape[0]
+            N = e.shape[0]
+            indices = torch.zeros(N, 32, dtype=torch.long, device=h.device)
+            indices[torch.arange(N), 0:2] = e[torch.arange(N)].long()
+            indices[torch.arange(N), 2:] = 1
 
-        indices = torch.zeros(T, N, 32, dtype=torch.long, device=h.device)
-        indices[torch.arange(T), torch.arange(N), 0:2] = e[torch.arange(N)].long()
-        indices[torch.arange(T), torch.arange(N), 2:] = 1
-        z = one_hot(indices, 32).float()
-        if len(e.shape) == 2:
-            return z[0]
-        return z
+        z = torch.log(one_hot(indices, 32).float() + torch.finfo(torch.float32).eps)
+        z.requires_grad = True
+        hz_flat = torch.cat([h, z.flatten(-2)], dim=-1)
+        z = self.scaler(hz_flat)
+
+
+        # z = self.scaler(z.flatten(-2)).unflatten(-1, (self.z_cls, self.z_size))
+        # if len(e.shape) == 2:
+        #     return z[0]
+        return z.unflatten(-1, (self.z_cls, self.z_size))
+
 
 
 class GridworldPosDecoder(nn.Module):
     def __init__(self):
         super().__init__()
+        self.grad = None
 
     def forward(self, h, z):
         return Categorical(z[..., 0:2, :])
@@ -97,6 +117,9 @@ class Decoder(nn.Module):
             DecoderConvBlock(cnn_multi * 2 ** 0, 32, 32, cnn_multi * 2 ** 1),
             DecoderConvBlock(out_channels, 64, 64, cnn_multi),
         )
+
+        self.register_full_backward_hook(lambda module, grad_input, grad_output: print(module, grad_input))
+        # self.register_backward_hook(lambda grad: print(grad))
 
     def forward(self, h, z):
         if len(h.shape) == 3:

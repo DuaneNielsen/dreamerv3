@@ -1,26 +1,23 @@
 import gymnasium
+from torch.optim import Adam
+from torchvision.utils import make_grid
 
 import replay
-from gridworlds.wrappers import OneHotActionWrapper, MaxCombineObservations
 from replay import BatchLoader, Step
 from collections import deque
-from torchvision.transforms.functional import to_tensor
-from rssm import make_small, RSSMLoss, make_small_gridworld
+from rssm import make_small_gridworld, RSSMLoss
 from actor_critic import Actor, Critic, ActorCriticTrainer
 import torch
-import torch.nn as nn
-from torch.optim import Adam
 from argparse import ArgumentParser
 import utils
 import wandb
-from utils import register_gradient_clamp
-from viz import visualize_buff, VizStep, ValueHook
+from viz import VizStep, ValueHook
 from wandb.data_types import Video
 import viz
 import numpy as np
-from torchvision.utils import make_grid
 import gridworlds.simpler_gridworld as gridworld
 from gridworlds.gridworld import OneHotTensorActionWrapper
+import torch.nn as nn
 
 
 def identity(obs):
@@ -55,6 +52,7 @@ def rollout(env, actor, rssm, pad_action):
             h = rssm.new_hidden0(batch_size=1)
             z = rssm.encode_observation(h, obs_tensor).mode
             reward, terminated, truncated = 0.0, False, False
+            r_pred, c_pred, obs_pred = rssm.reward_pred(h, z), rssm.continue_pred(h, z), rssm.decoder(h, z)
 
 
 class WorldModelTrainer(nn.Module):
@@ -63,7 +61,7 @@ class WorldModelTrainer(nn.Module):
         self.rssm = rssm
         self.opt = Adam(rssm.parameters(), lr=lr, eps=adam_eps)
         self.rssm_criterion = RSSMLoss()
-        register_gradient_clamp(self.rssm, grad_clip)
+        utils.register_gradient_clamp(self.rssm, grad_clip)
         self.action_meanings = action_meanings
 
     def train_model(self, obs, action, reward, cont):
@@ -78,6 +76,8 @@ class WorldModelTrainer(nn.Module):
         rssm_loss.backward()
         self.opt.step()
 
+        print(rssm.decoder.grad)
+
     def log_scalars(self):
         return {**self.rssm_criterion.loss_dict()}
 
@@ -88,8 +88,8 @@ class WorldModelTrainer(nn.Module):
             viz_batch_pred_buff = replay.unstack_batch(self.obs_dist.mode[0:8, 0:8], self.action[0:8, 0:8],
                                                        self.reward_dist.mean[0:8, 0:8], self.cont_dist.mean[0:8, 0:8],
                                                        inverse_obs_transform=identity)
-            viz_batch_gt = visualize_buff(viz_batch_gt_buff, vizualiser)
-            viz_batch_pred = visualize_buff(viz_batch_pred_buff, vizualiser)
+            viz_batch_gt = viz.visualize_buff(viz_batch_gt_buff, vizualiser)
+            viz_batch_pred = viz.visualize_buff(viz_batch_pred_buff, vizualiser)
             batch_panel = torch.cat(
                 (make_grid(torch.from_numpy(viz_batch_gt)), make_grid(torch.from_numpy(viz_batch_pred))),
                 dim=2).numpy().transpose(1, 2, 0)
@@ -131,7 +131,6 @@ class WorldModelTrainer(nn.Module):
             'wm_z_post': self.z_prior.argmax(-1).flatten().detach().cpu().numpy(),
         }
 
-
 class VizGridPosStep(VizStep):
     def __init__(self, action_meanings, env_name):
         super().__init__(action_meanings=action_meanings, hw=(64, 64))
@@ -140,7 +139,6 @@ class VizGridPosStep(VizStep):
 
     def observation(self, step):
         obs = np.clip(step.observation, a_min=0, a_max=15), self.grid, gridworld.yellow
-
         return gridworld.render(obs, (64, 64))
 
     def __call__(self, step):
@@ -174,7 +172,7 @@ def viz_reward_pred(step):
 
 def viz_cont_pred(step):
     if 'cont_pred' in step.info:
-        return viz.viz_reward(step.info['cont_pred'])
+        return viz.viz_cont(step.info['cont_pred'])
     else:
         return np.zeros((1, 64, 3), dtype=np.uint8)
 
@@ -258,6 +256,8 @@ if __name__ == '__main__':
 
     loader = BatchLoader(device=args.device, observation_transform=None)
 
+    rssm.decoder.register_full_backward_hook(lambda module, grad_input, grad_output: print(module, grad_output))
+
     for step in range(args.max_steps):
 
         buff += [next(gen)]
@@ -294,23 +294,22 @@ if __name__ == '__main__':
                 'trajectory_viz': Video(trajectory_viz)
             }, step=step)
 
-            print(
-                f'trajectory end:  len: {len(latest_trajectory)} reward {trajectory_reward} reward_pred: {trajectory_reward_pred}')
+            print(f'trajectory end:  len: {len(latest_trajectory)} reward {trajectory_reward} reward_pred: {trajectory_reward_pred}')
 
-    if step % args.log_every_n_steps == 0:
-        wandb.log({k: wandb.Image(v) for k, v in world_model_trainer.log_images(vizualizer).items()}, step=step)
+        if step % args.log_every_n_steps == 0:
+            wandb.log({k: wandb.Image(v) for k, v in world_model_trainer.log_images(vizualizer).items()}, step=step)
 
-        imag_obs = rssm.decoder(imag_h, imag_z).mode
-        imag_returns = actor_critic_trainer.log_distributions()['ac_returns'].to(args.device)
-        imagined_trajectory_viz = viz.visualize_imagined_trajectories(
-            imag_obs[:-1, :], imag_action[:-1, :], imag_rewards[:-1, :], imag_cont[:-1, :],
-            imag_returns[:, :], visualizer=visualizer_traj, inverse_obs_transform=identity)
+            imag_obs = rssm.decoder(imag_h, imag_z).mode
+            imag_returns = actor_critic_trainer.log_distributions()['ac_returns'].to(args.device)
+            imagined_trajectory_viz = viz.visualize_imagined_trajectories(
+                imag_obs[:-1, :], imag_action[:-1, :], imag_rewards[:-1, :], imag_cont[:-1, :],
+                imag_returns[:, :], visualizer=visualizer_traj, inverse_obs_transform=identity)
 
-        wandb.log({'ac_imagined_trajectory': wandb.Video(imagined_trajectory_viz)}, step=step)
+            wandb.log({'ac_imagined_trajectory': wandb.Video(imagined_trajectory_viz)}, step=step)
 
-        torch.save({
-            'args': args,
-            'step': step,
-            'actor_critic_trainer_state_dict': actor_critic_trainer.state_dict(),
-            'world_model_state_dict': world_model_trainer.state_dict(),
-        }, run_dir + '/checkpoint.pt')
+            torch.save({
+                'args': args,
+                'step': step,
+                'actor_critic_trainer_state_dict': actor_critic_trainer.state_dict(),
+                'world_model_state_dict': world_model_trainer.state_dict(),
+            }, run_dir + '/checkpoint.pt')
