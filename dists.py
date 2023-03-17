@@ -1,6 +1,6 @@
 import torch
 from torch.nn.functional import softmax
-from torch.distributions import OneHotCategorical, kl_divergence
+from torch.distributions import OneHotCategorical, kl_divergence, Normal
 from torch.nn.functional import one_hot
 from symlog import symlog, symexp
 
@@ -12,6 +12,21 @@ def sample_one_hot(logits, epsilon=0.01):
     probs = (1 - epsilon) * probs + epsilon * uniform
     dist = OneHotCategorical(probs=probs)
     return dist.sample() + probs - probs.detach()
+
+
+class ImageNormalDist(Normal):
+    def __init__(self, loc, scale, prepro, inv_prepro):
+        super().__init__(loc, scale)
+        self.prepro = prepro
+        self.inv_prepro = inv_prepro
+
+    def log_prob(self, value):
+        value = self.prepro(value)
+        return super().log_prob(value)
+
+    @property
+    def mean(self):
+        return self.inv_prepro(super().mean)
 
 
 class OneHotCategoricalStraightThru(OneHotCategorical):

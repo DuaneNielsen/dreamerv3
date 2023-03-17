@@ -53,7 +53,7 @@ class DecoderConvBlock(nn.Module):
 
 
 class Embedder(nn.Module):
-    def __init__(self, in_channels=3, cnn_multi=32):
+    def __init__(self, prepro, in_channels=3, cnn_multi=32):
         super().__init__()
         self.embedder = nn.Sequential(
             EncoderConvBlock(in_channels, 64, 64, cnn_multi),
@@ -62,10 +62,12 @@ class Embedder(nn.Module):
             EncoderConvBlock(cnn_multi * 2 ** 2, 8, 8, cnn_multi * 2 ** 3),
             nn.Flatten()
         )
+        self.prepro = prepro
 
     def forward(self, x):
         """
         param: x: [T, N, C, H, W] observation in standard form
         """
+        x = self.prepro(x)
         T, N, C, H, W = x.shape
         return self.embedder(x.flatten(start_dim=0, end_dim=1)).unflatten(0, (T, N))

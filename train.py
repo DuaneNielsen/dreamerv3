@@ -27,6 +27,7 @@ import numpy as np
 from torchvision.utils import make_grid
 from copy import deepcopy
 from math import ceil
+import pathlib
 
 
 class WorldModelTrainer(nn.Module):
@@ -43,8 +44,7 @@ class WorldModelTrainer(nn.Module):
 
         h0 = rssm.new_hidden0(args.batch_size)
         self.obs_dist, self.reward_dist, self.cont_dist, self.z_prior, self.z_post = rssm(obs, action, h0)
-        rssm_loss = self.rssm_criterion(self.obs, self.reward, self.cont,
-                                        self.obs_dist, self.reward_dist, self.cont_dist, self.z_prior, self.z_post)
+        rssm_loss = self.rssm_criterion(self.obs, self.reward, self.cont, self.obs_dist, self.reward_dist, self.cont_dist, self.z_prior, self.z_post)
 
         self.opt.zero_grad()
         rssm_loss.backward()
@@ -105,36 +105,35 @@ class Rollout:
         self.rssm = rssm
         self.env = env
         self.pad_action = pad_action
-        self.terminated = True
-        self.truncated = False
         self.h = None
+        self.terminated, self.truncated = True, False
         self.action = None
+        self.obs = None
 
     def step(self, action=None):
         with torch.no_grad():
             if self.terminated or self.truncated:
-                obs, info = self.env.reset()
+                self.obs, info = self.env.reset()
                 self.h = self.rssm.new_hidden0(batch_size=1)
-                obs_tensor = to_tensor(obs).to(self.rssm.device).unsqueeze(0)
-                z = self.rssm.encode_observation(self.h, obs_tensor).mode
-                r_pred, c_pred, obs_pred = self.rssm.reward_pred(self.h, z), self.rssm.continue_pred(self.h, z), self.rssm.decoder(self.h, z)
-                reward, self.terminated, self.truncated = 0.0, False, False
-
+                z = self.rssm.encode_observation(self.h, torch.from_numpy(self.obs).unsqueeze(0)).mode
                 self.action = action if action is not None else self.actor(self.h, z).sample()
-                return Step(obs, self.action[0].detach().cpu().numpy(), reward, self.terminated, self.truncated,
-                           reward_pred=r_pred.mean.detach().cpu().numpy(), cont_pred=c_pred.probs.detach().cpu().numpy(),
-                           obs_pred=obs_pred.mode[0].permute(1, 2, 0).detach().cpu().numpy())
+                self.terminated, self.truncated = False, False
+                r_pred = self.rssm.reward_pred(self.h, z)
+                c_pred = self.rssm.continue_pred(self.h, z)
+                obs_pred = self.rssm.decoder(self.h, z)
+                return Step(self.obs, self.action[0].detach().cpu().numpy(), 0., self.terminated, self.truncated,
+                            reward_pred=r_pred.mean.detach().cpu().numpy(),
+                            cont_pred=c_pred.probs.detach().cpu().numpy(),
+                            obs_pred=obs_pred.mean[0].detach().cpu().numpy())
 
-            else:
-                obs, reward, self.terminated, self.truncated, info = self.env.step(self.action[0].cpu())
-                obs_tensor = to_tensor(obs).to(self.rssm.device).unsqueeze(0)
-                self.h, z, r_pred, c_pred, obs_pred = self.rssm.step_reality(self.h, obs_tensor, self.action)
+            next_obs, reward, self.terminated, self.truncated, info = self.env.step(self.action[0].cpu())
+            self.h, z, r_pred, c_pred, obs_pred = self.rssm.step_reality(self.h, torch.from_numpy(self.obs).unsqueeze(0), self.action)
+            self.action = action if action is not None else self.actor(self.h, z).sample()
+            self.obs = next_obs
 
-                r_pred, c_pred, obs_pred = self.rssm.reward_pred(self.h, z), self.rssm.continue_pred(self.h, z), self.rssm.decoder(self.h, z)
-                self.action = action if action is not None else self.actor(self.h, z).sample()
-                return Step(obs, pad_action, reward, self.terminated, self.truncated,
-                           reward_pred=r_pred.mean.detach().cpu().numpy(), cont_pred=c_pred.probs.detach().cpu().numpy(),
-                           obs_pred=obs_pred.mode[0].permute(1, 2, 0).detach().cpu().numpy())
+            return Step(self.obs, self.action[0].detach().cpu().numpy(), reward, self.terminated, self.truncated,
+                        reward_pred=r_pred.mean.detach().cpu().numpy(), cont_pred=c_pred.probs.detach().cpu().numpy(),
+                        obs_pred=obs_pred.mean[0].detach().cpu().numpy())
 
 
 if __name__ == '__main__':
@@ -161,6 +160,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--decoder', type=str, default=None)
     parser.add_argument('--dev', action='store_true')
+    parser.add_argument('--full_obs', action='store_true')
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -183,7 +183,13 @@ if __name__ == '__main__':
         env = gridworld.RGBImageWrapper(env)
         env = gridworld.OneHotTensorActionWrapper(env)
 
-    if 'SimplerGridWorld' in args.env:
+    if 'SimplerGridWorld' in args.env and args.full_obs:
+        env = gymnasium.make(args.env)
+        import gridworlds.simpler_gridworld
+
+        env = gridworlds.simpler_gridworld.RGBObservationWrapper(env)
+        env = gridworld.OneHotTensorActionWrapper(env)
+    elif 'SimplerGridWorld' in args.env:
         env = gymnasium.make(args.env)
         env = PartialRGBObservationWrapper(env)
         env = gridworld.OneHotTensorActionWrapper(env)
@@ -193,8 +199,10 @@ if __name__ == '__main__':
     action_table = env.get_action_meanings()
     visualizer_traj = VizStep(action_meanings=action_table)
 
+
     def vizualize_obs_pred(step):
         return viz.normalized_image(step.info['obs_pred'])
+
 
     visualizer_traj.add_hook(vizualize_obs_pred)
     visualizer_traj.add_hook(viz_reward_pred)
@@ -248,9 +256,16 @@ if __name__ == '__main__':
             latest_trajectory = replay.get_tail_trajectory(buff)
             trajectory_reward = replay.total_reward(latest_trajectory)
             trajectory_reward_pred = replay.sum_key(latest_trajectory, 'reward_pred')
+            trajectory_reward_mse = replay.reward_mse(latest_trajectory)
+            trajectory_cont_mse = replay.cont_mse(latest_trajectory)
+            trajectory_obs_mse = replay.observation_mse(latest_trajectory)
+
             trajectory_viz = viz.visualize_buff(latest_trajectory, visualizer=visualizer_traj)
 
             wandb.log({
+                'trajectory_obs_mse': trajectory_obs_mse,
+                'trajectory_cont_mse': trajectory_cont_mse,
+                'trajectory_reward_mse': trajectory_reward_mse,
                 'trajectory_reward_pred': trajectory_reward_pred,
                 'trajectory_reward': trajectory_reward,
                 'trajectory_length': len(latest_trajectory),
@@ -293,9 +308,10 @@ if __name__ == '__main__':
 
                 wandb.log({'ac_imagined_trajectory': wandb.Video(imagined_trajectory_viz)}, step=step)
 
+                pathlib.Path(project_name + '/' + run_dir).mkdir(exist_ok=True, parents=True)
                 torch.save({
                     'args': args,
                     'step': step,
                     'actor_critic_trainer_state_dict': actor_critic_trainer.state_dict(),
                     'world_model_state_dict': world_model_trainer.state_dict(),
-                }, run_dir + '/checkpoint.pt')
+                }, project_name + '/' + run_dir + '/checkpoint.pt')

@@ -109,11 +109,9 @@ def make_caption(caption, color=(255, 255, 255, 255), fontsize=8, width=64, heig
     return np.array(img)
 
 
-def visualize_imagined_trajectories(obs_dec, action, rewards_dec, cont, value_preds, visualizer,
-                                    inverse_obs_transform=None):
+def visualize_imagined_trajectories(obs_dec, action, rewards_dec, cont, value_preds, visualizer):
     T, N = obs_dec.shape[0:2]
-    imagine_buff = replay.unstack_batch(obs_dec, action, rewards_dec, cont, value=value_preds, return_type='list',
-                                        inverse_obs_transform=inverse_obs_transform)
+    imagine_buff = replay.unstack_batch(obs_dec, action, rewards_dec, cont, value=value_preds, return_type='list')
     imagine_viz = []
     for trajectory in imagine_buff:
         imagine_viz += [viz.visualize_buff(trajectory, visualizer=visualizer)]

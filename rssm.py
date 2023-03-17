@@ -31,8 +31,9 @@ from torch.distributions import Normal, Bernoulli, OneHotCategorical, Categorica
 from torchvision.utils import make_grid
 
 import replay
+import symlog
 from dists import OneHotCategoricalStraightThru, categorical_kl_divergence_clamped, TwoHotSymlog, \
-    OneHotCategoricalUnimix
+    OneHotCategoricalUnimix, ImageNormalDist
 from blocks import MLPBlock, ModernDecoderConvBlock, Embedder, DecoderConvBlock
 from torch.nn.functional import one_hot
 
@@ -104,8 +105,10 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, out_channels=3, cnn_multi=32, mlp_hidden=640, h_size=512, z_size=32, z_cls=32):
+    def __init__(self, prepro, inv_prepro, out_channels=3, cnn_multi=32, mlp_hidden=640, h_size=512, z_size=32, z_cls=32):
         super().__init__()
+        self.prepro = prepro
+        self.inv_prepro = inv_prepro
         self.decoder = nn.Sequential(
             nn.Linear(z_cls * z_size + h_size, mlp_hidden, bias=False),
             nn.LayerNorm([mlp_hidden]),
@@ -118,7 +121,7 @@ class Decoder(nn.Module):
             DecoderConvBlock(out_channels, 64, 64, cnn_multi),
         )
 
-        self.register_full_backward_hook(lambda module, grad_input, grad_output: print(module, grad_input))
+        # self.register_full_backward_hook(lambda module, grad_input, grad_output: print(module, grad_input))
         # self.register_backward_hook(lambda grad: print(grad))
 
     def forward(self, h, z):
@@ -131,12 +134,13 @@ class Decoder(nn.Module):
             hz_flat = torch.cat([h, z.flatten(-2)], dim=-1)
             x = self.decoder(hz_flat)
 
-        return Normal(loc=x, scale=1.)
+        return ImageNormalDist(loc=x, scale=1., prepro=self.prepro, inv_prepro=self.inv_prepro)
 
 
 class ModernDecoder(nn.Module):
     def __init__(self, out_channels=3, cnn_multi=32, mlp_layers=2, mlp_hidden=512, h_size=512, z_size=32, z_cls=32):
         super().__init__()
+        self.prepro = prepro
         self.decoder = nn.Sequential(
             nn.Linear(z_cls * z_size + h_size, mlp_hidden, bias=False),
             *[MLPBlock(mlp_hidden, mlp_hidden) for _ in range(mlp_layers - 1)],
@@ -158,7 +162,7 @@ class ModernDecoder(nn.Module):
             hz_flat = torch.cat([h, z.flatten(-2)], dim=-1)
             x = self.decoder(hz_flat)
 
-        return Normal(loc=x, scale=1.)
+        return ImageNormalDist(loc=x, scale=1., prepro=self.prepro)
 
 
 class DynamicsPredictor(nn.Module):
@@ -289,17 +293,17 @@ class RSSM(nn.Module):
 
         h_list = [h0]
         embedding = self.embedder(x)
-        z_logit_list = [self.encoder(h0, embedding[0])]
-        z_list = [OneHotCategoricalStraightThru(logits=z_logit_list[0]).sample()]
+        z_post_logit_list = [self.encoder(h0, embedding[0])]
+        z_post_list = [OneHotCategoricalStraightThru(logits=z_post_logit_list[0]).sample()]
 
         for t in range(1, x.size(0)):
-            h_list += [self.seq_model(z_list[t - 1], a[t - 1], h_list[t - 1])]
-            z_logit_list += [self.encoder(h_list[t], embedding[t])]
-            z_list += [OneHotCategoricalStraightThru(logits=z_logit_list[t]).sample()]
+            h_list += [self.seq_model(z_post_list[t - 1], a[t - 1], h_list[t - 1])]
+            z_post_logit_list += [self.encoder(h_list[t], embedding[t])]
+            z_post_list += [OneHotCategoricalStraightThru(logits=z_post_logit_list[t]).sample()]
 
         h = torch.stack(h_list)
-        z_post_logits = torch.stack(z_logit_list)
-        z_post = torch.stack(z_list)
+        z_post_logits = torch.stack(z_post_logit_list)
+        z_post = torch.stack(z_post_list)
 
         x_dist = self.decoder(h, z_post)
         z_prior_logits = self.dynamics_pred(h)
@@ -444,6 +448,16 @@ class RSSMLoss:
         }
 
 
+def prepro(observation):
+    return symlog.symlog(observation.float()).permute(0, 1, 4, 2, 3)
+
+
+def inv_prepro(observation_enc):
+    if len(observation_enc.shape) == 4:
+        return symlog.symexp(observation_enc).permute(0, 2, 3, 1)
+    return symlog.symexp(observation_enc).permute(0, 1, 3, 4, 2)
+
+
 def make_small(action_classes, in_channels=3, decoder=None):
     """
     Small as per Appendix B of the Mastering Diverse Domains through World Models paper
@@ -455,11 +469,10 @@ def make_small(action_classes, in_channels=3, decoder=None):
     if decoder == 'modern':
         decoder = ModernDecoder(out_channels=in_channels)
     else:
-        decoder = Decoder(out_channels=in_channels)
-
+        decoder = Decoder(out_channels=in_channels, prepro=prepro, inv_prepro=inv_prepro)
     return RSSM(
         sequence_model=SequenceModel(action_classes),
-        embedder=Embedder(in_channels=in_channels),
+        embedder=Embedder(in_channels=in_channels, prepro=prepro),
         encoder=Encoder(),
         decoder=decoder,
         dynamics_pred=DynamicsPredictor(),

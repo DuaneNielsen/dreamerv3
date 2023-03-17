@@ -3,6 +3,7 @@ from gridworlds.env import Env
 import torch
 from collections import deque
 import numpy as np
+import statistics
 
 
 class Step:
@@ -127,20 +128,14 @@ class BatchLoader:
         """
 
         observation, action, reward, cont = sample_batch(replay_buffer, batch_length, batch_size)
-        if self.observation_transform is not None:
-            observation = self.observation_transform(observation).to(device=self.device, dtype=torch.float32)
-        else:
-            observation = torch.from_numpy(observation).to(device=self.device, dtype=torch.float32)
 
-        action = torch.from_numpy(action).to(device=self.device, dtype=torch.float32)
-        reward = torch.from_numpy(reward).to(device=self.device, dtype=torch.float32)
-        cont = torch.from_numpy(cont).to(device=self.device, dtype=torch.float32)
+        observation = torch.from_numpy(observation).to(device=self.device, dtype=torch.float)
+        action = torch.from_numpy(action).to(device=self.device, dtype=torch.float)
+        reward = torch.from_numpy(reward).to(device=self.device, dtype=torch.float)
+        cont = torch.from_numpy(cont).to(device=self.device, dtype=torch.float)
 
-        observation.requires_grad = True
-        action.requires_grad = True
-        reward.requires_grad = True
-        cont.requires_grad = True
         return observation, action, reward, cont
+
 
 def get_trajectories(buff, max_trajectories=None):
     offset = 0
@@ -182,19 +177,36 @@ def sum_key(trajectory, key):
     return sum[0]
 
 
+def reward_mse(trajectory):
+    error = []
+    for step in trajectory:
+        error += [(step.reward.item() - step.info['reward_pred'].item()) ** 2]
+    return statistics.mean(error)
+
+
+def cont_mse(trajectory):
+    error = []
+    for step in trajectory:
+        error += [(step.cont.item() - step.info['cont_pred'].item()) ** 2]
+    return statistics.mean(error)
+
+
+def observation_mse(trajectory):
+    error = []
+    for step in trajectory:
+        error += [np.mean((step.observation - step.info['obs_pred']) ** 2)]
+    return statistics.mean(error)
+
+
 def unroll(tensor):
     return [trajectory.aslist() for trajectory in tensor.unbind(1)]
 
 
-def unstack_batch(observation, action, reward, cont, inverse_obs_transform=None, return_type=None, **kwargs):
+def unstack_batch(observation, action, reward, cont, return_type=None, **kwargs):
     """
     input in T, N, ... format
     """
     T, N = observation.shape[0:2]
-    if inverse_obs_transform is not None:
-        observation = inverse_obs_transform(observation)
-    else:
-        observation = invert_symlog(observation)
     buff = []
 
     observation = observation.detach().cpu().numpy()
@@ -210,7 +222,7 @@ def unstack_batch(observation, action, reward, cont, inverse_obs_transform=None,
                 buff += [Step(observation[t, n], action[t, n], reward[t, n], cont=cont[t, n], **args_step)]
         return buff
 
-    if return_type is 'list':
+    if return_type == 'list':
         for n in range(N):
             trajectory = []
             for t in range(T):
