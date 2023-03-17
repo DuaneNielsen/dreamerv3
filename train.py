@@ -1,5 +1,4 @@
 import gymnasium
-from torchvision.transforms.functional import to_tensor
 from torch.nn.functional import one_hot
 from gridworlds.simpler_gridworld import PartialRGBObservationWrapper
 
