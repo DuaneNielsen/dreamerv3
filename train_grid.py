@@ -155,8 +155,8 @@ class ObsPredHook:
         self.grid, self.grid_steps, _, _ = gridworld.make_grid(self.env_name)
 
     def __call__(self, step):
-        if 'obs_pred' in step.info:
-            obs = np.clip(step.info['obs_pred'], a_min=0, a_max=15), self.grid, gridworld.yellow
+        if step.pred_step is not None:
+            obs = np.clip(step.pred_step.observation, a_min=0, a_max=15), self.grid, gridworld.yellow
             image = gridworld.render(obs, (64, 64))
         else:
             image = np.zeros((1, 64, 3), dtype=np.uint8)
@@ -164,15 +164,15 @@ class ObsPredHook:
 
 
 def viz_reward_pred(step):
-    if 'reward_pred' in step.info:
-        return viz.viz_reward(step.info['reward_pred'])
+    if step.pred_step is not None:
+        return viz.viz_reward(step.pred_step.reward)
     else:
         return np.zeros((1, 64, 3), dtype=np.uint8)
 
 
 def viz_cont_pred(step):
-    if 'cont_pred' in step.info:
-        return viz.viz_cont(step.info['cont_pred'])
+    if step.pred_step is not None:
+        return viz.viz_cont(step.pred_step.cont)
     else:
         return np.zeros((1, 64, 3), dtype=np.uint8)
 

@@ -4,10 +4,12 @@ import torch
 from collections import deque
 import numpy as np
 import statistics
+from PIL import Image
+import io
 
 
 class Step:
-    def __init__(self, observation, action, reward=0., terminated=None, truncated=None, cont=None, **kwargs):
+    def __init__(self, observation, action, reward=0., terminated=None, truncated=None, cont=None, pred_step=None, **kwargs):
         """
 
         :param observation:
@@ -16,7 +18,7 @@ class Step:
         :param terminated:
         :param truncated:
         """
-        self.observation = observation
+        self._observation = observation
         self.action = action
         self.reward = np.array([reward], dtype=np.float32)
         assert (terminated is None) != (cont is None), 'must specify terminated or cont but not both'
@@ -26,7 +28,12 @@ class Step:
             self.cont = cont
         self.terminated = terminated
         self.truncated = truncated
+        self.pred_step = pred_step
         self.info = kwargs
+
+    @property
+    def observation(self):
+        return self._observation
 
     def as_tuple(self):
         return self.observation, self.action, self.reward, self.cont
@@ -37,6 +44,21 @@ class Step:
     @property
     def is_terminal(self):
         return self.terminated or self.truncated
+
+
+class PNGStep(Step):
+    def __init__(self, observation, action, reward=0., terminated=None, truncated=None, cont=None, **kwargs):
+
+        observation = Image.fromarray(observation)
+        file = io.BytesIO()
+        observation.save(file, format='PNG')
+        file = file.getvalue()
+        super().__init__(file, action, reward=reward, terminated=terminated, truncated=truncated, cont=cont, **kwargs)
+
+    @property
+    def observation(self):
+        pic = Image.open(io.BytesIO(self._observation))
+        return np.array(pic)
 
 
 def get_trajectory(buff, offset, truncate_len=None):
@@ -177,24 +199,31 @@ def sum_key(trajectory, key):
     return sum[0]
 
 
+def pred_reward(trajectory):
+    t_reward = 0
+    for step in trajectory:
+        t_reward += step.pred_step.reward
+    return t_reward[0]
+
+
 def reward_mse(trajectory):
     error = []
     for step in trajectory:
-        error += [(step.reward.item() - step.info['reward_pred'].item()) ** 2]
+        error += [(step.reward.item() - step.pred_step.reward.item()) ** 2]
     return statistics.mean(error)
 
 
 def cont_mse(trajectory):
     error = []
     for step in trajectory:
-        error += [(step.cont.item() - step.info['cont_pred'].item()) ** 2]
+        error += [(step.cont.item() - step.pred_step.cont.item()) ** 2]
     return statistics.mean(error)
 
 
 def observation_mse(trajectory):
     error = []
     for step in trajectory:
-        error += [np.mean((step.observation - step.info['obs_pred']) ** 2)]
+        error += [np.mean((step.observation - step.pred_step.observation) ** 2)]
     return statistics.mean(error)
 
 

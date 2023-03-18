@@ -4,7 +4,7 @@ from gridworlds.simpler_gridworld import PartialRGBObservationWrapper
 
 import replay
 from gridworlds.wrappers import OneHotActionWrapper, MaxCombineObservations
-from replay import BatchLoader, Step
+from replay import BatchLoader, PNGStep
 from collections import deque
 
 from rssm import RSSMLoss
@@ -44,7 +44,8 @@ class WorldModelTrainer:
 
         h0 = rssm.new_hidden0(args.batch_size)
         self.obs_dist, self.reward_dist, self.cont_dist, self.z_prior, self.z_post = rssm(obs, action, h0)
-        rssm_loss = self.rssm_criterion(self.obs, self.reward, self.cont, self.obs_dist, self.reward_dist, self.cont_dist, self.z_prior, self.z_post)
+        rssm_loss = self.rssm_criterion(self.obs, self.reward, self.cont, self.obs_dist, self.reward_dist, self.cont_dist, self.z_prior,
+                                        self.z_post)
 
         self.opt.zero_grad()
         rssm_loss.backward()
@@ -131,19 +132,21 @@ class Rollout:
                 r_pred = self.rssm.reward_pred(self.h, z)
                 c_pred = self.rssm.continue_pred(self.h, z)
                 obs_pred = self.rssm.decoder(self.h, z)
-                return Step(self.obs, self.action[0].detach().cpu().numpy(), 0., self.terminated, self.truncated,
-                            reward_pred=r_pred.mean.detach().cpu().numpy(),
-                            cont_pred=c_pred.probs.detach().cpu().numpy(),
-                            obs_pred=obs_pred.mean[0].detach().cpu().numpy())
+                return PNGStep(self.obs, self.action[0].detach().cpu().numpy(), 0., self.terminated, self.truncated,
+                               pred_step=PNGStep(
+                                   obs_pred.mean[0].detach().cpu().numpy().astype(np.uint8),
+                                   self.action[0].detach().cpu().numpy(),
+                                   reward=r_pred.mean.detach().cpu().numpy(),
+                                   cont=c_pred.probs.detach().cpu().numpy()))
 
             next_obs, reward, self.terminated, self.truncated, info = self.env.step(self.action[0].cpu())
             self.h, z, r_pred, c_pred, obs_pred = self.rssm.step_reality(self.h, torch.from_numpy(self.obs).unsqueeze(0), self.action)
             self.action = action if action is not None else self.actor(self.h, z).sample()
             self.obs = next_obs
 
-            return Step(self.obs, self.action[0].detach().cpu().numpy(), reward, self.terminated, self.truncated,
-                        reward_pred=r_pred.mean.detach().cpu().numpy(), cont_pred=c_pred.probs.detach().cpu().numpy(),
-                        obs_pred=obs_pred.mean[0].detach().cpu().numpy())
+            return PNGStep(self.obs, self.action[0].detach().cpu().numpy(), reward, self.terminated, self.truncated,
+                           pred_step=PNGStep(obs_pred.mean[0].detach().cpu().numpy().astype(np.uint8), self.action[0].detach().cpu().numpy(),
+                                             reward=r_pred.mean.detach().cpu().numpy(), cont=c_pred.probs.detach().cpu().numpy()))
 
 
 if __name__ == '__main__':
@@ -212,10 +215,8 @@ if __name__ == '__main__':
     action_table = env.get_action_meanings()
     visualizer_traj = VizStep(action_meanings=action_table)
 
-
     def vizualize_obs_pred(step):
-        return viz.normalized_image(step.info['obs_pred'])
-
+        return viz.normalized_image(step.pred_step.observation)
 
     visualizer_traj.add_hook(vizualize_obs_pred)
     visualizer_traj.add_hook(viz_reward_pred)
@@ -267,7 +268,7 @@ if __name__ == '__main__':
         if buff[-1].is_terminal:
             latest_trajectory = replay.get_tail_trajectory(buff)
             trajectory_reward = replay.total_reward(latest_trajectory)
-            trajectory_reward_pred = replay.sum_key(latest_trajectory, 'reward_pred')
+            trajectory_reward_pred = replay.pred_reward(latest_trajectory)
             trajectory_reward_mse = replay.reward_mse(latest_trajectory)
             trajectory_cont_mse = replay.cont_mse(latest_trajectory)
             trajectory_obs_mse = replay.observation_mse(latest_trajectory)
