@@ -23,22 +23,14 @@
  During prediction z = zpost
 
 """
-import numpy as np
 import torch
-import torch.nn as nn
 from torch import nn as nn
-from torch.distributions import Normal, Bernoulli, OneHotCategorical, Categorical
-from torchvision.utils import make_grid
+from torch.distributions import Bernoulli, Categorical
 
-import replay
 import symlog
 from dists import OneHotCategoricalStraightThru, categorical_kl_divergence_clamped, TwoHotSymlog, \
     OneHotCategoricalUnimix, ImageNormalDist
-from blocks import MLPBlock, ModernDecoderConvBlock, Embedder, DecoderConvBlock
-from torch.nn.functional import one_hot
-
-from utils import register_gradient_clamp
-from viz import visualize_buff
+from blocks import MLPBlock, ModernDecoderConvBlock, DecoderConvBlock
 
 
 class GridworldPosEncoder(nn.Module):
@@ -458,30 +450,6 @@ def inv_prepro(observation_enc):
     return symlog.symexp(observation_enc).permute(0, 1, 3, 4, 2)
 
 
-def make_small(action_classes, in_channels=3, decoder=None):
-    """
-    Small as per Appendix B of the Mastering Diverse Domains through World Models paper
-    :param action_classes:
-    :return:
-    """
-
-    decoder = '' if decoder is None else decoder
-    if decoder == 'modern':
-        decoder = ModernDecoder(out_channels=in_channels)
-    else:
-        decoder = Decoder(out_channels=in_channels, prepro=prepro, inv_prepro=inv_prepro)
-    return RSSM(
-        sequence_model=SequenceModel(action_classes),
-        embedder=Embedder(in_channels=in_channels, prepro=prepro),
-        encoder=Encoder(),
-        decoder=decoder,
-        dynamics_pred=DynamicsPredictor(),
-        reward_pred=RewardPredictor(),
-        continue_pred=ContinuePredictor(),
-        h_size=512
-    )
-
-
 def make_small_gridworld(action_classes):
     """
     Small as per Appendix B of the Mastering Diverse Domains through World Models paper
@@ -507,8 +475,6 @@ if __name__ == '__main__':
     Load a saved RSSM and manually inspect the model quality
     """
 
-    import utils
-    from torch.optim import Adam
     from argparse import ArgumentParser
     from matplotlib import pyplot as plt
     from torch.distributions import OneHotCategorical
@@ -522,8 +488,8 @@ if __name__ == '__main__':
         args = parser.parse_args()
 
         rssm = make_small(action_classes=args.action_classes, in_channels=3)
-        steps, _ = torch.load(args.resume, rssm)
-
+        checkpoint = torch.load(args.resume)
+        rssm.load_state_dict(checkpoint['world_model_state_dict'])
 
         class ImaginedEnv:
             def __init__(self):

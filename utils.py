@@ -14,9 +14,7 @@ def next_run():
         run_id += 1
     with run_id_file.open('w') as f:
         f.write(str(run_id))
-    dir = Path(f'runs/run_{run_id}')
-    dir.mkdir(exist_ok=True)
-    return str(dir)
+    return f'run_{run_id}'
 
 
 def bin_values(values, min, max, num_bins):
@@ -70,4 +68,5 @@ if __name__ == '__main__':
 
     print(timer.elapsed)
     print(timer)
+
 

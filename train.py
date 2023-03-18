@@ -7,7 +7,7 @@ from gridworlds.wrappers import OneHotActionWrapper, MaxCombineObservations
 from replay import BatchLoader, Step
 from collections import deque
 
-from rssm import make_small, RSSMLoss
+from rssm import RSSMLoss
 from actor_critic import Actor, Critic, ActorCriticTrainer
 import torch
 import torch.nn as nn
@@ -18,6 +18,7 @@ import wandb
 
 from train_grid import viz_reward_pred, viz_cont_pred
 from utils import register_gradient_clamp
+from config import make
 from viz import visualize_buff, VizStep, ValueHook
 from wandb.data_types import Video
 import viz
@@ -29,7 +30,7 @@ from math import ceil
 import pathlib
 
 
-class WorldModelTrainer(nn.Module):
+class WorldModelTrainer:
     def __init__(self, rssm, lr, adam_eps, grad_clip, action_meanings=None):
         super().__init__()
         self.rssm = rssm
@@ -97,6 +98,16 @@ class WorldModelTrainer(nn.Module):
             'wm_z_post': self.z_prior.argmax(-1).flatten().detach().cpu().numpy(),
         }
 
+    def state_dict(self):
+        return {
+            'rssm_state_dict': self.rssm.state_dict(),
+            'opt_state_dict': self.opt.state_dict()
+        }
+
+    def load_state_dict(self, state_dict):
+        self.rssm.load_state_dict(state_dict['rssm_state_dict'])
+        self.opt.load_state_dict(state_dict['opt_state_dict'])
+
 
 class Rollout:
     def __init__(self, env, actor, rssm, pad_action):
@@ -138,6 +149,7 @@ class Rollout:
 if __name__ == '__main__':
 
     parser = ArgumentParser()
+    parser.add_argument('--model_size', type=str, choices=['extra_small', 'small', 'medium'], default='medium')
     parser.add_argument('--train_ratio', type=int, default=32)
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--batch_length', type=int, default=64)
@@ -167,7 +179,9 @@ if __name__ == '__main__':
     project_name = f"dreamerv3-{args.env.replace('/', '-')}"
     project_name = project_name + '-dev' if args.dev else project_name
     wandb.init(project=project_name)
-    run_dir = utils.next_run()
+    run_dir = 'runs/' + project_name + '/' + utils.next_run()
+    pathlib.Path(run_dir).mkdir(exist_ok=True, parents=True)
+    vars(args)['run_dir'] = run_dir
     wandb.config.update(args)
 
     if 'ALE' in args.env:
@@ -211,14 +225,13 @@ if __name__ == '__main__':
     vizualizer = VizStep(action_meanings=action_table)
     vizualizer.add_hook(ValueHook())
 
-    rssm = make_small(action_classes=env.action_space.n.item(), decoder=args.decoder).to(args.device)
+    rssm, actor, critic = make(args.model_size, action_size=1, action_classes=env.action_space.n.item(), decoder=args.decoder)
+    rssm, actor, critic = rssm.to(args.device), actor.to(args.device), critic.to(args.device)
 
     world_model_trainer = WorldModelTrainer(rssm,
                                             lr=args.world_model_learning_rate,
                                             adam_eps=args.world_model_adam_epsilon,
                                             grad_clip=args.world_model_gradient_clipping)
-    critic = Critic()
-    actor = Actor(action_size=1, action_classes=env.action_space.n.item())
 
     rssm_policy = deepcopy(rssm).cpu()
     actor_policy = deepcopy(actor).cpu()
@@ -307,10 +320,9 @@ if __name__ == '__main__':
 
                 wandb.log({'ac_imagined_trajectory': wandb.Video(imagined_trajectory_viz)}, step=step)
 
-                pathlib.Path(project_name + '/' + run_dir).mkdir(exist_ok=True, parents=True)
                 torch.save({
                     'args': args,
                     'step': step,
                     'actor_critic_trainer_state_dict': actor_critic_trainer.state_dict(),
                     'world_model_state_dict': world_model_trainer.state_dict(),
-                }, project_name + '/' + run_dir + '/checkpoint.pt')
+                }, run_dir + '/checkpoint.pt')

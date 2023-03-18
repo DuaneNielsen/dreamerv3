@@ -201,7 +201,7 @@ def polyak_update(critic, ema_critic, critic_ema_decay=0.98):
             ema_critic_params.data = ema_critic_params * critic_ema_decay + (1 - critic_ema_decay) * critic_params
 
 
-class ActorCriticTrainer(nn.Module):
+class ActorCriticTrainer:
     def __init__(self, actor, critic, lr=3e-5, adam_eps=1e-5, grad_clip=100., device='cpu'):
         super().__init__()
         self.actor_criterion = ActorLoss()
@@ -261,6 +261,20 @@ class ActorCriticTrainer(nn.Module):
             'ac_cont': self.cont.detach().cpu(),
             **actor_criterion_dist
         }
+
+    def state_dict(self):
+        return {
+            'actor_state_dict': self.actor.state_dict(),
+            'critic_state_dict': self.critic.state_dict(),
+            'actor_opt_state_dict': self.actor_opt.state_dict(),
+            'critic_opt_state_dict': self.critic_opt.state_dict(),
+        }
+
+    def load_state_dict(self, state_dict):
+        self.actor.load_state_dict(state_dict['actor_state_dict'])
+        self.critic.load_state_dict(state_dict['critic_state_dict'])
+        self.actor_opt.load_state_dict(state_dict['actor_opt_state_dict'])
+        self.critic_opt.load_state_dict(state_dict['critic_opt_state_dict'])
 
 
 if __name__ == '__main__':
