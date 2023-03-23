@@ -25,11 +25,11 @@
 """
 import torch
 from torch import nn as nn
-from torch.distributions import Bernoulli, Categorical
+from torch.distributions import Bernoulli, Categorical, Independent
 
 import symlog
-from dists import OneHotCategoricalStraightThru, categorical_kl_divergence_clamped, TwoHotSymlog, \
-    OneHotCategoricalUnimix, ImageNormalDist
+from dists import OneHotCategoricalStraightThru, categorical_kl_divergence, TwoHotSymlog, \
+    OneHotCategoricalUnimix, ImageNormalDist, ImageMSEDist
 from blocks import MLPBlock, ModernDecoderConvBlock, DecoderConvBlock
 
 
@@ -126,13 +126,14 @@ class Decoder(nn.Module):
             hz_flat = torch.cat([h, z.flatten(-2)], dim=-1)
             x = self.decoder(hz_flat)
 
-        return ImageNormalDist(loc=x, scale=1., prepro=self.prepro, inv_prepro=self.inv_prepro)
+        return ImageMSEDist(mode=x, dims=3, prepro=self.prepro, inv_prepro=self.inv_prepro)
 
 
 class ModernDecoder(nn.Module):
-    def __init__(self, out_channels=3, cnn_multi=32, mlp_layers=2, mlp_hidden=512, h_size=512, z_size=32, z_cls=32):
+    def __init__(self, prepro, inv_prepro, out_channels=3, cnn_multi=32, mlp_layers=2, mlp_hidden=512, h_size=512, z_size=32, z_cls=32):
         super().__init__()
         self.prepro = prepro
+        self.inv_prepro = inv_prepro
         self.decoder = nn.Sequential(
             nn.Linear(z_cls * z_size + h_size, mlp_hidden, bias=False),
             *[MLPBlock(mlp_hidden, mlp_hidden) for _ in range(mlp_layers - 1)],
@@ -154,7 +155,7 @@ class ModernDecoder(nn.Module):
             hz_flat = torch.cat([h, z.flatten(-2)], dim=-1)
             x = self.decoder(hz_flat)
 
-        return ImageNormalDist(loc=x, scale=1., prepro=self.prepro)
+        return ImageMSEDist(mode=x, dims=3, prepro=self.prepro, inv_prepro=self.inv_prepro)
 
 
 class DynamicsPredictor(nn.Module):
@@ -302,7 +303,7 @@ class RSSM(nn.Module):
         reward_probs = self.reward_pred(h, z_post)
         continue_dist = self.continue_pred(h, z_post)
 
-        return x_dist, reward_probs, continue_dist, z_prior_logits, z_post_logits
+        return x_dist, reward_probs, continue_dist, z_prior_logits, z_post_logits, z_post
 
     def new_hidden0(self, batch_size):
         """
@@ -420,12 +421,12 @@ class RSSMLoss:
         self.loss = None
 
     def __call__(self, obs, rewards, cont, obs_dist, reward_dist, cont_dist, z_prior_logits, z_post_logits):
-        self.loss_obs = - obs_dist.log_prob(obs).flatten(start_dim=2).mean(-1)
+        self.loss_obs = - obs_dist.log_prob(obs)
         self.loss_reward = - reward_dist.log_prob(rewards.squeeze(-1))
         self.loss_cont = - cont_dist.log_prob(cont).squeeze(-1)
-        self.loss_dyn = 0.5 * categorical_kl_divergence_clamped(z_post_logits.detach(), z_prior_logits).mean(-1)
-        self.loss_rep = 0.1 * categorical_kl_divergence_clamped(z_post_logits, z_prior_logits.detach()).mean(-1)
-        self.loss = self.loss_obs + self.loss_reward + self.loss_cont + self.loss_dyn + self.loss_rep
+        self.loss_dyn = categorical_kl_divergence(z_post_logits.detach(), z_prior_logits)
+        self.loss_rep = categorical_kl_divergence(z_post_logits, z_prior_logits.detach())
+        self.loss = self.loss_obs + self.loss_reward + self.loss_cont + 0.5 * self.loss_dyn + 0.1 * self.loss_rep
         self.loss = self.loss.mean()
         return self.loss
 
@@ -438,16 +439,6 @@ class RSSMLoss:
             'wm_loss_dyn': self.loss_dyn.mean().item(),
             'wm_loss_rep': self.loss_rep.mean().item()
         }
-
-
-def prepro(observation):
-    return symlog.symlog(observation.float()).permute(0, 1, 4, 2, 3)
-
-
-def inv_prepro(observation_enc):
-    if len(observation_enc.shape) == 4:
-        return symlog.symexp(observation_enc).permute(0, 2, 3, 1)
-    return symlog.symexp(observation_enc).permute(0, 1, 3, 4, 2)
 
 
 def make_small_gridworld(action_classes):
@@ -480,6 +471,7 @@ if __name__ == '__main__':
     from torch.distributions import OneHotCategorical
     from matplotlib.widgets import Button
     from torch.nn.functional import one_hot
+    from config import make
 
     with torch.no_grad():
         parser = ArgumentParser()
@@ -487,9 +479,10 @@ if __name__ == '__main__':
         parser.add_argument('--action_classes', type=int, required=True)
         args = parser.parse_args()
 
-        rssm = make_small(action_classes=args.action_classes, in_channels=3)
         checkpoint = torch.load(args.resume)
-        rssm.load_state_dict(checkpoint['world_model_state_dict'])
+        step, run_args = checkpoint['step'], checkpoint['args']
+        rssm, actor, critic = make(model_size='medium',action_size=1, action_classes=args.action_classes, in_channels=3)
+        rssm.load_state_dict(checkpoint['world_model_state_dict']['rssm_state_dict'])
 
         class ImaginedEnv:
             def __init__(self):
@@ -505,7 +498,7 @@ if __name__ == '__main__':
             def step(self, action):
                 if self.h is None:
                     raise Exception('call env.reset() before step')
-                self.h, self.z, r, c = rssm.step_imagine(self.h, self.z, action)
+                self.h, self.z, r, c = rssm.single_step_imagine(self.h, self.z, action)
                 obs = rssm.decoder(self.h, self.z).mean
                 return obs, r, c
 
@@ -513,7 +506,8 @@ if __name__ == '__main__':
         def press_button(action):
             action = one_hot(torch.tensor([[action]]), args.action_classes)
             obs, r, c = env.step(action)
-            obs_plt.set_data(obs[0].permute(1, 2, 0).clamp(0, 1))
+            obs_plt.set_data(normalize(obs)[0].clamp(0, 255).to(torch.uint8).detach().numpy())
+            tx.set_text(f'reward {r} continue: {c}')
             fig.canvas.draw()
             fig.canvas.flush_events()
 
@@ -533,12 +527,20 @@ if __name__ == '__main__':
         def press_three(event):
             press_button(3)
 
+        def press_four(event):
+            press_button(4)
+
 
         env = ImaginedEnv()
         obs = env.reset()
 
+        def normalize(rgb_image):
+            return (rgb_image - rgb_image.min()) / (rgb_image.max() - rgb_image.min()) * 255
+
         fig, ax = plt.subplots()
-        obs_plt = ax.imshow(obs[0].permute(1, 2, 0).detach().clamp(0, 1))
+        obs_plt = ax.imshow(normalize(obs)[0].detach().clamp(0, 255).to(torch.uint8).detach().numpy())
+
+        tx = ax.text(3, 8, 'reward_zero', style='italic', bbox={'facecolor': 'red', 'alpha': 0.5, 'pad': 10})
         fig.canvas.draw()
         fig.canvas.flush_events()
 
@@ -557,5 +559,10 @@ if __name__ == '__main__':
         axthree = fig.add_axes([0.5, 0.05, 0.1, 0.075])
         bthree = Button(axthree, '3')
         bthree.on_clicked(press_three)
+
+        axfour = fig.add_axes([0.6, 0.05, 0.1, 0.075])
+        bfour = Button(axfour, '4')
+        bfour.on_clicked(press_four)
+
 
         plt.show()

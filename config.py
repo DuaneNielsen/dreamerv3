@@ -1,7 +1,28 @@
 from blocks import Embedder
-from rssm import ModernDecoder, Decoder, prepro, inv_prepro, RSSM, SequenceModel, Encoder, DynamicsPredictor, RewardPredictor, \
+from rssm import ModernDecoder, Decoder, RSSM, SequenceModel, Encoder, DynamicsPredictor, RewardPredictor, \
     ContinuePredictor
 from actor_critic import Actor, Critic
+import symlog
+
+
+def prepro_symlog(observation):
+    return symlog.symlog(observation.float()).permute(0, 1, 4, 2, 3) / 255.
+
+
+def inv_prepro_symlog(observation_enc):
+    if len(observation_enc.shape) == 4:
+        return symlog.symexp(observation_enc).permute(0, 2, 3, 1) * 255.
+    return symlog.symexp(observation_enc).permute(0, 1, 3, 4, 2) * 255.
+
+
+def prepro(observation):
+    return observation.float().permute(0, 1, 4, 2, 3) / 255.
+
+
+def inv_prepro(observation_enc):
+    if len(observation_enc.shape) == 4:
+        return observation_enc.permute(0, 2, 3, 1) * 255.
+    return observation_enc.permute(0, 1, 3, 4, 2) * 255.
 
 
 def make(model_size, action_size, action_classes, in_channels=3, decoder=None):
@@ -37,7 +58,9 @@ def make(model_size, action_size, action_classes, in_channels=3, decoder=None):
 
     decoder = '' if decoder is None else decoder
     if decoder == 'modern':
-        decoder = ModernDecoder(out_channels=in_channels,  h_size=gru_recurrent_units)
+        decoder = ModernDecoder(prepro=prepro,
+                                inv_prepro=inv_prepro,
+                                out_channels=in_channels,  h_size=gru_recurrent_units)
     else:
         decoder = Decoder(cnn_multi=cnn_multiplier,  h_size=gru_recurrent_units, out_channels=in_channels, prepro=prepro, inv_prepro=inv_prepro)
     rssm = RSSM(

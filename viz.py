@@ -174,7 +174,7 @@ class VizStep:
         self.hooks = []
 
     def observation(self, step):
-        return normalized_image(step.observation)
+        return step.observation
 
     def action(self, step):
         return self.viz_action(step.action)

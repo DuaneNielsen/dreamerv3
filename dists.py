@@ -1,6 +1,6 @@
 import torch
 from torch.nn.functional import softmax
-from torch.distributions import OneHotCategorical, kl_divergence, Normal
+from torch.distributions import OneHotCategorical, kl_divergence, Normal, Independent
 from torch.nn.functional import one_hot
 from symlog import symlog, symexp
 
@@ -29,6 +29,30 @@ class ImageNormalDist(Normal):
         return self.inv_prepro(super().mean)
 
 
+class ImageMSEDist:
+    def __init__(self, mode, dims, prepro, inv_prepro):
+        self._mode = mode
+        self._dims = tuple([-x for x in range(1, dims + 1)])
+        self.prepro = prepro
+        self.inv_prepro = inv_prepro
+        self.batch_shape = mode.shape[:len(mode.shape) - dims]
+        self.event_shape = mode.shape[len(mode.shape) - dims:]
+
+    def log_prob(self, value):
+        value = self.prepro(value)
+        assert self._mode.shape == value.shape, (self._mode.shape, value.shape)
+        dist = (self._mode - value) ** 2
+        return - dist.sum(self._dims)
+
+    @property
+    def mean(self):
+        return self.inv_prepro(self._mode)
+
+    @property
+    def mode(self):
+        return self.inv_prepro(self._mode)
+
+
 class OneHotCategoricalStraightThru(OneHotCategorical):
     def __init__(self, probs=None, logits=None, epsilon=0.01):
         probs = probs if probs is not None else softmax(logits, -1)
@@ -50,12 +74,23 @@ class OneHotCategoricalUnimix(OneHotCategorical):
         super().__init__(probs=probs, validate_args=False)
 
 
-def categorical_kl_divergence_clamped(logits_left, logits_right, clamp=1.):
-    return kl_divergence(
-        OneHotCategorical(logits=logits_left),
-        OneHotCategorical(logits=logits_right)
-    ).clamp(max=clamp)
+# def categorical_kl_divergence_clamped(logits_left, logits_right, clamp=1.):
+#     return kl_divergence(
+#         OneHotCategorical(logits=logits_left),
+#         OneHotCategorical(logits=logits_right)
+#
+#     ).clamp(max=clamp)
 
+# def categorical_kl_divergence(logits_p, logits_q, free=1.):
+#     kl = (torch.softmax(logits_p, -1) * (torch.log_softmax(logits_p, -1) - torch.log_softmax(logits_q, -1))).sum((-1, -2))
+#     return torch.maximum(kl, torch.tensor([free], device=kl.device))
+
+
+def categorical_kl_divergence(logits_p, logits_q, free=1.):
+    p = Independent(OneHotCategorical(logits=logits_p), 1)
+    q = Independent(OneHotCategorical(logits=logits_q), 1)
+    kl = kl_divergence(p, q)
+    return torch.maximum(kl, torch.tensor([free], device=kl.device))
 
 class EncodeTwoHot:
     def __init__(self, low, high, num_bins, device='cpu'):
