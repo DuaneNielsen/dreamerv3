@@ -184,6 +184,7 @@ class ActorLoss:
         return {
             'ac_actor_loss_advantage': self.adv.detach().cpu().numpy(),
             'ac_actor_loss_entropy_dist': self.ent.detach().cpu().numpy(),
+            'ac_actor_loss_normed_returns_dist': self.normed_ret.sum(0).detach().cpu().numpy(),
         }
 
 

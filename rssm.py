@@ -30,7 +30,7 @@ from torch.distributions import Bernoulli, Categorical, Independent
 import symlog
 from dists import OneHotCategoricalStraightThru, categorical_kl_divergence, TwoHotSymlog, \
     OneHotCategoricalUnimix, ImageNormalDist, ImageMSEDist
-from blocks import MLPBlock, ModernDecoderConvBlock, DecoderConvBlock
+from blocks import MLPBlock, ModernDecoderConvBlock, DecoderConvBlock, init_weights
 
 
 class GridworldPosEncoder(nn.Module):
@@ -83,6 +83,7 @@ class Encoder(nn.Module):
             nn.Linear(mlp_hidden, 32 * 32, bias=True),
             nn.Unflatten(1, (32, 32))
         )
+        self.apply(init_weights)
 
     def forward(self, h, e):
         """
@@ -94,6 +95,28 @@ class Encoder(nn.Module):
         param: e :  [N, embed_size]
         """
         return self.encoder(torch.cat([h, e], dim=-1))
+
+
+class LinearEncoder(nn.Module):
+    def __init__(self, cnn_multi=32, mlp_hidden=640, h_size=512):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(4 * 4 * cnn_multi * 2 ** 3 + h_size, 32 * 32, bias=False),
+            nn.Unflatten(1, (32, 32))
+        )
+        self.apply(init_weights)
+
+    def forward(self, h, e):
+        """
+        Encodes a single timestep.
+
+        Note that since we require h to encode, we cannot encode more than 1 step at a time,
+        so the input does not take a T dimension
+        param: h : [N, h_size]
+        param: e :  [N, embed_size]
+        """
+        return self.encoder(torch.cat([h, e], dim=-1))
+
 
 
 class Decoder(nn.Module):
@@ -110,8 +133,9 @@ class Decoder(nn.Module):
             DecoderConvBlock(cnn_multi * 2 ** 2, 8, 8, cnn_multi * 2 ** 3),
             DecoderConvBlock(cnn_multi * 2 ** 1, 16, 16, cnn_multi * 2 ** 2),
             DecoderConvBlock(cnn_multi * 2 ** 0, 32, 32, cnn_multi * 2 ** 1),
-            DecoderConvBlock(out_channels, 64, 64, cnn_multi),
+            DecoderConvBlock(out_channels, 64, 64, cnn_multi, bias=True),
         )
+        self.apply(init_weights)
 
         # self.register_full_backward_hook(lambda module, grad_input, grad_output: print(module, grad_input))
         # self.register_backward_hook(lambda grad: print(grad))
@@ -135,15 +159,16 @@ class ModernDecoder(nn.Module):
         self.prepro = prepro
         self.inv_prepro = inv_prepro
         self.decoder = nn.Sequential(
-            nn.Linear(z_cls * z_size + h_size, mlp_hidden, bias=False),
-            *[MLPBlock(mlp_hidden, mlp_hidden) for _ in range(mlp_layers - 1)],
-            MLPBlock(mlp_hidden, 4 * 4 * cnn_multi * 2 ** 3),
+            nn.Linear(z_cls * z_size + h_size, 4 * 4 * cnn_multi * 2 ** 3, bias=True),
+            # *[MLPBlock(mlp_hidden, mlp_hidden) for _ in range(mlp_layers - 1)],
+            # MLPBlock(mlp_hidden, 4 * 4 * cnn_multi * 2 ** 3),
             nn.Unflatten(-1, (cnn_multi * 2 ** 3, 4, 4)),
             ModernDecoderConvBlock(cnn_multi * 2 ** 2, 8, 8, cnn_multi * 2 ** 3),
             ModernDecoderConvBlock(cnn_multi * 2 ** 1, 16, 16, cnn_multi * 2 ** 2),
             ModernDecoderConvBlock(cnn_multi * 2 ** 0, 32, 32, cnn_multi * 2 ** 1),
-            ModernDecoderConvBlock(out_channels, 64, 64, cnn_multi),
+            ModernDecoderConvBlock(out_channels, 64, 64, cnn_multi, bias=True),
         )
+        self.apply(init_weights)
 
     def forward(self, h, z):
         if len(h.shape) == 3:
@@ -169,10 +194,45 @@ class DynamicsPredictor(nn.Module):
         )
         self.z_size = z_size
         self.z_cls = z_cls
+        self.apply(init_weights)
 
     def forward(self, h):
         z_flat = self.dynamics_predictor(h)
         return z_flat.unflatten(-1, (self.z_size, self.z_cls))
+
+
+class DynamicsPredictor(nn.Module):
+    def __init__(self, h_size=512, mlp_size=640, z_size=32, z_cls=32):
+        super().__init__()
+        self.dynamics_predictor = nn.Sequential(
+            nn.Linear(h_size, mlp_size, bias=False),
+            nn.LayerNorm([mlp_size]),
+            nn.SiLU(),
+            nn.Linear(mlp_size, z_size * z_cls, bias=True),
+        )
+        self.z_size = z_size
+        self.z_cls = z_cls
+        self.apply(init_weights)
+
+    def forward(self, h):
+        z_flat = self.dynamics_predictor(h)
+        return z_flat.unflatten(-1, (self.z_size, self.z_cls))
+
+
+class LinearDynamicsPredictor(nn.Module):
+    def __init__(self, h_size=512, mlp_size=640, z_size=32, z_cls=32):
+        super().__init__()
+        self.dynamics_predictor = nn.Sequential(
+            nn.Linear(h_size, z_size * z_cls, bias=True),
+        )
+        self.z_size = z_size
+        self.z_cls = z_cls
+        self.apply(init_weights)
+
+    def forward(self, h):
+        z_flat = self.dynamics_predictor(h)
+        return z_flat.unflatten(-1, (self.z_size, self.z_cls))
+
 
 
 class RewardPredictor(nn.Module):
@@ -180,13 +240,14 @@ class RewardPredictor(nn.Module):
         super().__init__()
 
         self.output = nn.Linear(mlp_size, 256, bias=False)
-        self.output.weight.data.zero_()
 
         self.reward_predictor = nn.Sequential(
             MLPBlock(z_cls * z_size + h_size, mlp_size),
             *[MLPBlock(mlp_size, mlp_size) for _ in range(mlp_layers - 1)],
             self.output
         )
+        self.apply(init_weights)
+        self.output.weight.data.zero_()
 
     def forward(self, h, z):
         hz_flat = torch.cat([h, z.flatten(-2)], dim=-1)
@@ -201,6 +262,7 @@ class ContinuePredictor(nn.Module):
             *[MLPBlock(mlp_size, mlp_size) for _ in range(mlp_layers - 1)],
             nn.Linear(mlp_size, 1, bias=False)
         )
+        self.apply(init_weights)
 
     def forward(self, h, z):
         hz_flat = torch.cat([h, z.flatten(-2)], dim=-1)
@@ -211,6 +273,7 @@ class SequenceModel(nn.Module):
     def __init__(self, a_cls, a_size=1, h_size=512, z_size=32, z_cls=32):
         super().__init__()
         self.seq_model = nn.GRUCell(z_size * z_cls + a_size * a_cls, h_size)
+        self.apply(init_weights)
 
     def forward(self, z, a, h):
         za_flat = torch.cat([z.flatten(-2), a.flatten(-2)], dim=1)

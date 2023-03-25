@@ -1,6 +1,6 @@
 from blocks import Embedder
 from rssm import ModernDecoder, Decoder, RSSM, SequenceModel, Encoder, DynamicsPredictor, RewardPredictor, \
-    ContinuePredictor
+    ContinuePredictor, LinearEncoder, LinearDynamicsPredictor
 from actor_critic import Actor, Critic
 import symlog
 
@@ -66,7 +66,7 @@ def make(model_size, action_size, action_classes, in_channels=3, decoder=None):
     rssm = RSSM(
         sequence_model=SequenceModel(action_classes, h_size=gru_recurrent_units),
         embedder=Embedder(cnn_multi=cnn_multiplier, in_channels=in_channels, prepro=prepro),
-        encoder=Encoder(cnn_multi=cnn_multiplier, mlp_hidden=dense_hidden_units, h_size=gru_recurrent_units),
+        encoder=LinearEncoder(cnn_multi=cnn_multiplier, mlp_hidden=dense_hidden_units, h_size=gru_recurrent_units),
         decoder=decoder,
         dynamics_pred=DynamicsPredictor(mlp_size=dense_hidden_units, h_size=gru_recurrent_units),
         reward_pred=RewardPredictor(h_size=gru_recurrent_units, mlp_size=dense_hidden_units, mlp_layers=mlp_layers),

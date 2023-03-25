@@ -30,6 +30,16 @@ from math import ceil
 import pathlib
 
 
+def grad_norm(model):
+    total_norm = 0
+    parameters = [p for p in model.parameters() if p.grad is not None and p.requires_grad]
+    for p in parameters:
+        param_norm = p.grad.detach().data.norm(2)
+        total_norm += param_norm.item() ** 2
+    total_norm = total_norm ** 0.5
+    return total_norm
+
+
 class WorldModelTrainer:
     def __init__(self, rssm, lr, adam_eps, grad_clip, action_meanings=None):
         super().__init__()
@@ -43,6 +53,7 @@ class WorldModelTrainer:
         self.z_imagine = None
         self.reward_imagine = None
         self.cont_imagine = None
+        wandb.watch(self.rssm, self.rssm_criterion, log='gradients', log_freq=100)
 
     def train_model(self, obs, action, reward, cont):
         batch_length, batch_size = obs.shape[0:2]

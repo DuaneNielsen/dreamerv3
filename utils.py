@@ -52,6 +52,8 @@ def register_gradient_clamp(nn_module, gradient_min_max):
             lambda grad: torch.clamp(grad, -gradient_min_max, gradient_min_max))
 
 
+
+
 if __name__ == '__main__':
 
     def fibonacci(n):
