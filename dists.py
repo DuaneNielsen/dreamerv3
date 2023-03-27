@@ -29,28 +29,44 @@ class ImageNormalDist(Normal):
         return self.inv_prepro(super().mean)
 
 
+class ProcessedDist:
+    def __init__(self, dist, prepro, postpro):
+        self.dist = dist
+        self.prepro = prepro
+        self.postpro = postpro
+
+    def log_prob(self, x):
+        x = self.prepro(x)
+        return self.dist.log_prob(x)
+
+    @property
+    def mean(self):
+        return self.postpro(self.dist.mean)
+
+    @property
+    def mode(self):
+        return self.postpro(self.dist.mean)
+
+
 class ImageMSEDist:
-    def __init__(self, mode, dims, prepro, inv_prepro):
+    def __init__(self, mode, dims=3):
         self._mode = mode
         self._dims = tuple([-x for x in range(1, dims + 1)])
-        self.prepro = prepro
-        self.inv_prepro = inv_prepro
         self.batch_shape = mode.shape[:len(mode.shape) - dims]
         self.event_shape = mode.shape[len(mode.shape) - dims:]
 
     def log_prob(self, value):
-        value = self.prepro(value)
         assert self._mode.shape == value.shape, (self._mode.shape, value.shape)
         dist = (self._mode - value) ** 2
         return - dist.sum(self._dims)
 
     @property
     def mean(self):
-        return self.inv_prepro(self._mode)
+        return self._mode
 
     @property
     def mode(self):
-        return self.inv_prepro(self._mode)
+        return self._mode
 
 
 class OneHotCategoricalStraightThru(OneHotCategorical):

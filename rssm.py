@@ -29,48 +29,28 @@ from torch.distributions import Bernoulli, Categorical, Independent
 
 import symlog
 from dists import OneHotCategoricalStraightThru, categorical_kl_divergence, TwoHotSymlog, \
-    OneHotCategoricalUnimix, ImageNormalDist, ImageMSEDist
-from blocks import MLPBlock, ModernDecoderConvBlock, DecoderConvBlock, init_weights
+    OneHotCategoricalUnimix, ImageNormalDist, ImageMSEDist, ProcessedDist
+from blocks import MLPBlock, ModernDecoderConvBlock, DecoderConvBlock, init_weights, EncoderConvBlock
 
 
-class GridworldPosEncoder(nn.Module):
-    def __init__(self, h_size=512, z_size=32, z_cls=32):
+class Embedder(nn.Module):
+    def __init__(self, in_channels=3, cnn_multi=32):
         super().__init__()
-        self.z_cls, self.z_size = z_cls, z_size
-        self.scaler = nn.Linear(z_size * z_cls + h_size, z_size * z_cls, bias=True)
+        self.embedder = nn.Sequential(
+            EncoderConvBlock(in_channels, 64, 64, cnn_multi),
+            EncoderConvBlock(cnn_multi * 2 ** 0, 32, 32, cnn_multi * 2 ** 1),
+            EncoderConvBlock(cnn_multi * 2 ** 1, 16, 16, cnn_multi * 2 ** 2),
+            EncoderConvBlock(cnn_multi * 2 ** 2, 8, 8, cnn_multi * 2 ** 3),
+            nn.Flatten()
+        )
 
-    def forward(self, h, e):
-        if len(e.shape) == 3:
-            T, N = e.shape[0:2]
-            indices = torch.zeros(T, N, 32, dtype=torch.long, device=h.device)
-            indices[torch.arange(T), torch.arange(N), 0:2] = e[torch.arange(N)].long()
-            indices[torch.arange(T), torch.arange(N), 2:] = 1
-        else:
-            N = e.shape[0]
-            indices = torch.zeros(N, 32, dtype=torch.long, device=h.device)
-            indices[torch.arange(N), 0:2] = e[torch.arange(N)].long()
-            indices[torch.arange(N), 2:] = 1
-
-        z = torch.log(one_hot(indices, 32).float() + torch.finfo(torch.float32).eps)
-        z.requires_grad = True
-        hz_flat = torch.cat([h, z.flatten(-2)], dim=-1)
-        z = self.scaler(hz_flat)
-
-
-        # z = self.scaler(z.flatten(-2)).unflatten(-1, (self.z_cls, self.z_size))
-        # if len(e.shape) == 2:
-        #     return z[0]
-        return z.unflatten(-1, (self.z_cls, self.z_size))
-
-
-
-class GridworldPosDecoder(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.grad = None
-
-    def forward(self, h, z):
-        return Categorical(z[..., 0:2, :])
+    def forward(self, x):
+        """
+        param: x: [T, N, C, H, W] observation in standard form
+        """
+        batch_shape = x.shape[0:-3]
+        # T, N, C, H, W = x.shape
+        return self.embedder(x.flatten(start_dim=0, end_dim=len(batch_shape)-1)).unflatten(0, batch_shape)
 
 
 class Encoder(nn.Module):
@@ -118,16 +98,13 @@ class LinearEncoder(nn.Module):
         return self.encoder(torch.cat([h, e], dim=-1))
 
 
-
 class Decoder(nn.Module):
-    def __init__(self, prepro, inv_prepro, out_channels=3, cnn_multi=32, mlp_hidden=640, h_size=512, z_size=32, z_cls=32):
+    def __init__(self, out_channels=3, cnn_multi=32, mlp_hidden=640, h_size=512, z_size=32, z_cls=32):
         super().__init__()
-        self.prepro = prepro
-        self.inv_prepro = inv_prepro
         self.decoder = nn.Sequential(
             nn.Linear(z_cls * z_size + h_size, mlp_hidden, bias=False),
-            nn.LayerNorm([mlp_hidden]),
-            nn.SiLU(),
+            # nn.LayerNorm([mlp_hidden]),
+            # nn.SiLU(),
             nn.Linear(mlp_hidden, 4 * 4 * cnn_multi * 2 ** 3, bias=True),
             nn.Unflatten(-1, (cnn_multi * 2 ** 3, 4, 4)),
             DecoderConvBlock(cnn_multi * 2 ** 2, 8, 8, cnn_multi * 2 ** 3),
@@ -150,18 +127,14 @@ class Decoder(nn.Module):
             hz_flat = torch.cat([h, z.flatten(-2)], dim=-1)
             x = self.decoder(hz_flat)
 
-        return ImageMSEDist(mode=x, dims=3, prepro=self.prepro, inv_prepro=self.inv_prepro)
+        return ImageMSEDist(mode=x, dims=3)
 
 
 class ModernDecoder(nn.Module):
-    def __init__(self, prepro, inv_prepro, out_channels=3, cnn_multi=32, mlp_layers=2, mlp_hidden=512, h_size=512, z_size=32, z_cls=32):
+    def __init__(self, out_channels=3, cnn_multi=32, mlp_layers=2, mlp_hidden=512, h_size=512, z_size=32, z_cls=32):
         super().__init__()
-        self.prepro = prepro
-        self.inv_prepro = inv_prepro
         self.decoder = nn.Sequential(
             nn.Linear(z_cls * z_size + h_size, 4 * 4 * cnn_multi * 2 ** 3, bias=True),
-            # *[MLPBlock(mlp_hidden, mlp_hidden) for _ in range(mlp_layers - 1)],
-            # MLPBlock(mlp_hidden, 4 * 4 * cnn_multi * 2 ** 3),
             nn.Unflatten(-1, (cnn_multi * 2 ** 3, 4, 4)),
             ModernDecoderConvBlock(cnn_multi * 2 ** 2, 8, 8, cnn_multi * 2 ** 3),
             ModernDecoderConvBlock(cnn_multi * 2 ** 1, 16, 16, cnn_multi * 2 ** 2),
@@ -180,25 +153,7 @@ class ModernDecoder(nn.Module):
             hz_flat = torch.cat([h, z.flatten(-2)], dim=-1)
             x = self.decoder(hz_flat)
 
-        return ImageMSEDist(mode=x, dims=3, prepro=self.prepro, inv_prepro=self.inv_prepro)
-
-
-class DynamicsPredictor(nn.Module):
-    def __init__(self, h_size=512, mlp_size=640, z_size=32, z_cls=32):
-        super().__init__()
-        self.dynamics_predictor = nn.Sequential(
-            nn.Linear(h_size, mlp_size, bias=False),
-            nn.LayerNorm([mlp_size]),
-            nn.SiLU(),
-            nn.Linear(mlp_size, z_size * z_cls, bias=True),
-        )
-        self.z_size = z_size
-        self.z_cls = z_cls
-        self.apply(init_weights)
-
-    def forward(self, h):
-        z_flat = self.dynamics_predictor(h)
-        return z_flat.unflatten(-1, (self.z_size, self.z_cls))
+        return ImageMSEDist(mode=x, dims=3)
 
 
 class DynamicsPredictor(nn.Module):
@@ -280,9 +235,31 @@ class SequenceModel(nn.Module):
         return self.seq_model(za_flat, h)
 
 
+class EmbedderPrepro(nn.Module):
+    def __init__(self, embedder, prepro):
+        super().__init__()
+        self.embedder = embedder
+        self.prepro = prepro
+
+    def forward(self, x):
+        x = self.prepro(x)
+        return self.embedder(x)
+
+
+class DecoderProcessed(nn.Module):
+    def __init__(self, decoder, prepro, postpro):
+        super().__init__()
+        self.decoder = decoder
+        self.prepro = prepro
+        self.postpro = postpro
+
+    def forward(self, h, z):
+        obs_dist = self.decoder(h, z)
+        return ProcessedDist(obs_dist, self.prepro, self.postpro)
+
+
 class RSSM(nn.Module):
-    def __init__(self, sequence_model, embedder, encoder, decoder, dynamics_pred, reward_pred, continue_pred,
-                 h_size=512):
+    def __init__(self, sequence_model, embedder, encoder, decoder, dynamics_pred, reward_pred, continue_pred, h_size=512):
         super().__init__()
         """
          Sequence Model:       h = f( h, z, a )
@@ -291,7 +268,7 @@ class RSSM(nn.Module):
          Dynamics predictor    zpost ~ p ( zpost | h )
          Reward predictor:     r ~ p( z | h )
          Continue predictor:   c ~ p( z | h )
-         Decoder:              x ~ p( x | h, z )\
+         Decoder:              x ~ p( x | h, z )
         """
 
         self.h_size = h_size
@@ -303,10 +280,6 @@ class RSSM(nn.Module):
         self.reward_pred = reward_pred
         self.continue_pred = continue_pred
         self.dummy = nn.Parameter(torch.empty(0))
-
-        # prediction state
-        # self.h = None
-        # self.z = None
 
     @property
     def device(self):
@@ -502,25 +475,6 @@ class RSSMLoss:
             'wm_loss_dyn': self.loss_dyn.mean().item(),
             'wm_loss_rep': self.loss_rep.mean().item()
         }
-
-
-def make_small_gridworld(action_classes):
-    """
-    Small as per Appendix B of the Mastering Diverse Domains through World Models paper
-    :param action_classes:
-    :return:
-    """
-
-    return RSSM(
-        sequence_model=SequenceModel(action_classes),
-        embedder=nn.Identity(),
-        encoder=GridworldPosEncoder(),
-        decoder=GridworldPosDecoder(),
-        dynamics_pred=DynamicsPredictor(),
-        reward_pred=RewardPredictor(),
-        continue_pred=ContinuePredictor(),
-        h_size=512
-    )
 
 
 if __name__ == '__main__':

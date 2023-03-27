@@ -47,6 +47,7 @@ class Actor(nn.Module):
 
 def score(reward, cont, value, discount=0.997, lamb_da=0.95):
     """
+
     params: reward [T, N, 1]
     params: cont [T,N,1]
     params: value[T,N,1]
@@ -71,7 +72,7 @@ def score(reward, cont, value, discount=0.997, lamb_da=0.95):
            act                act0                   act1                  act2                   act3
         r  reward[1:]         rew1                   rew2                  rew3
         c  cont[1:] * disc    con1 * disc            con2 * disc           con3 * disc
-        v  val[1:]            val1                   val2                  val3
+        v  val[1:]            val0                   val1                  val2
 
         t  temp_diff          r1 + c1 * v1 * (1-l)   r1 + c1 * v1 * (1-l)  r1 + c1 * v1 * (1-l)
 

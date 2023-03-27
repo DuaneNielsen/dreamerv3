@@ -16,7 +16,6 @@ from argparse import ArgumentParser
 import utils
 import wandb
 
-from train_grid import viz_reward_pred, viz_cont_pred
 from utils import register_gradient_clamp
 from config import make
 from viz import visualize_buff, VizStep, ValueHook
@@ -28,6 +27,7 @@ from torchvision.utils import make_grid
 from copy import deepcopy
 from math import ceil
 import pathlib
+import pickle
 
 
 def grad_norm(model):
@@ -68,34 +68,34 @@ class WorldModelTrainer:
         rssm_loss.backward()
         self.opt.step()
 
-        with torch.no_grad():
-            h_imagine = [rssm.new_hidden0(batch_size)]
-            z_imagine = [rssm.encode_observation(h_imagine[0], self.obs[0]).mean]
-            for step in range(batch_length-1):
-                h, z = rssm.step_imagine(h_imagine[-1], z_imagine[-1], self.action[step])
-                h_imagine += [h]
-                z_imagine += [z]
-            self.h_imagine = torch.stack(h_imagine)
-            self.z_imagine = torch.stack(z_imagine)
-            self.reward_imagine_dist = rssm.reward_pred(self.h_imagine, self.z_imagine)
-            self.cont_imagine_dist = rssm.continue_pred(self.h_imagine, self.z_imagine)
-
-            h_post = [rssm.new_hidden0(batch_size)]
-            for step in range(batch_length-1):
-                h, z = rssm.step_imagine(h_post[-1], self.z_post[step], self.action[step])
-                h_post += [h]
-            self.h_post = torch.stack(h_post)
-            self.reward_zpost_dist = rssm.reward_pred(self.h_post, self.z_post)
-            self.cont_zpost_dist = rssm.continue_pred(self.h_post, self.z_post)
+        # with torch.no_grad():
+        #     h_imagine = [rssm.new_hidden0(batch_size)]
+        #     z_imagine = [rssm.encode_observation(h_imagine[0], self.obs[0]).mean]
+        #     for step in range(batch_length-1):
+        #         h, z = rssm.step_imagine(h_imagine[-1], z_imagine[-1], self.action[step])
+        #         h_imagine += [h]
+        #         z_imagine += [z]
+        #     self.h_imagine = torch.stack(h_imagine)
+        #     self.z_imagine = torch.stack(z_imagine)
+        #     self.reward_imagine_dist = rssm.reward_pred(self.h_imagine, self.z_imagine)
+        #     self.cont_imagine_dist = rssm.continue_pred(self.h_imagine, self.z_imagine)
+        #
+        #     h_post = [rssm.new_hidden0(batch_size)]
+        #     for step in range(batch_length-1):
+        #         h, z = rssm.step_imagine(h_post[-1], self.z_post[step], self.action[step])
+        #         h_post += [h]
+        #     self.h_post = torch.stack(h_post)
+        #     self.reward_zpost_dist = rssm.reward_pred(self.h_post, self.z_post)
+        #     self.cont_zpost_dist = rssm.continue_pred(self.h_post, self.z_post)
 
     def log_scalars(self):
         return {
             **self.rssm_criterion.loss_dict(),
-            'wm_reward_imagine_max_error': (self.reward_imagine_dist.mean.unsqueeze(-1) - self.reward_dist.mean.unsqueeze(-1)).abs().max(),
-            'wm_reward_zpost_max_error': (self.reward_imagine_dist.mean.unsqueeze(-1) - self.reward_zpost_dist.mean.unsqueeze(-1)).abs().max(),
-            'wm_cont_imagine_max_error': (self.cont_imagine_dist.mean - self.cont_dist.mean).abs().max(),
-            'wm_cont_imagine_post_max_error': (self.cont_imagine_dist.mean - self.cont_zpost_dist.mean).abs().max(),
-            'wn_zpost_z_imagine': (self.z_imagine - self.z_post).abs().max(),
+            # 'wm_reward_imagine_max_error': (self.reward_imagine_dist.mean.unsqueeze(-1) - self.reward_dist.mean.unsqueeze(-1)).abs().max(),
+            # 'wm_reward_zpost_max_error': (self.reward_imagine_dist.mean.unsqueeze(-1) - self.reward_zpost_dist.mean.unsqueeze(-1)).abs().max(),
+            # 'wm_cont_imagine_max_error': (self.cont_imagine_dist.mean - self.cont_dist.mean).abs().max(),
+            # 'wm_cont_imagine_post_max_error': (self.cont_imagine_dist.mean - self.cont_zpost_dist.mean).abs().max(),
+            # 'wn_zpost_z_imagine': (self.z_imagine - self.z_post).abs().max(),
        }
 
     def log_images(self, vizualiser):
@@ -141,11 +141,11 @@ class WorldModelTrainer:
             'wm_cont_probs': self.cont_dist.probs.flatten().detach().cpu().numpy(),
             'wm_z_prior': self.z_prior_logits.argmax(-1).flatten().detach().cpu().numpy(),
             'wm_z_post': self.z_prior_logits.argmax(-1).flatten().detach().cpu().numpy(),
-            'wm_reward_imagine_abs_error': (self.reward_imagine_dist.mean - self.reward_dist.mean).abs().cpu().detach(),
-            'wm_reward_zpost_abs_error': (self.reward_imagine_dist.mean - self.reward_zpost_dist.mean).abs().cpu().detach(),
-            'wm_cont_imagine_abs_error': (self.cont_imagine_dist.mean - self.cont_dist.mean).abs().cpu().detach(),
-            'wm_cont_zpost_abs_error': (self.cont_imagine_dist.mean - self.cont_zpost_dist.mean).abs().cpu().detach(),
-            'wm_zpost_abs_error': (self.z_post - self.z_imagine).abs().cpu().detach()
+            # 'wm_reward_imagine_abs_error': (self.reward_imagine_dist.mean - self.reward_dist.mean).abs().cpu().detach(),
+            # 'wm_reward_zpost_abs_error': (self.reward_imagine_dist.mean - self.reward_zpost_dist.mean).abs().cpu().detach(),
+            # 'wm_cont_imagine_abs_error': (self.cont_imagine_dist.mean - self.cont_dist.mean).abs().cpu().detach(),
+            # 'wm_cont_zpost_abs_error': (self.cont_imagine_dist.mean - self.cont_zpost_dist.mean).abs().cpu().detach(),
+            # 'wm_zpost_abs_error': (self.z_post - self.z_imagine).abs().cpu().detach()
         }
 
     def state_dict(self):
@@ -231,6 +231,20 @@ def log_trajectory_viz(latest_trajectory, step, prefix=''):
     wandb.log({
         f'{prefix}_trajectory_viz': Video(trajectory_viz)
     }, step=step)
+
+
+def viz_reward_pred(step):
+    if step.pred_step is not None:
+        return viz.viz_reward(step.pred_step.reward)
+    else:
+        return np.zeros((1, 64, 3), dtype=np.uint8)
+
+
+def viz_cont_pred(step):
+    if step.pred_step is not None:
+        return viz.viz_cont(step.pred_step.cont)
+    else:
+        return np.zeros((1, 64, 3), dtype=np.uint8)
 
 
 if __name__ == '__main__':
@@ -436,3 +450,6 @@ if __name__ == '__main__':
                     'actor_critic_trainer_state_dict': actor_critic_trainer.state_dict(),
                     'world_model_state_dict': world_model_trainer.state_dict(),
                 }, run_dir + '/checkpoint.pt')
+
+                with pathlib.Path(run_dir + '/buff.pk').open('wb') as f:
+                    pickle.dump(buff, f)
