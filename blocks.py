@@ -35,6 +35,19 @@ class EncoderConvBlock(nn.Module):
         return self.block(x)
 
 
+class EncoderBatchNormConvBlock(nn.Module):
+    def __init__(self, in_channels, in_height, in_width, out_channels):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=4, stride=2, bias=False, padding=1, padding_mode='replicate'),
+            nn.BatchNorm2d(out_channels),
+            nn.SiLU(inplace=True))
+        self.apply(init_weights)
+
+    def forward(self, x):
+        return self.block(x)
+
+
 class ModernDecoderConvBlock(nn.Module):
     def __init__(self, out_channels, out_h, out_w, in_channels, bias=False):
         super().__init__()
@@ -42,6 +55,21 @@ class ModernDecoderConvBlock(nn.Module):
             nn.UpsamplingNearest2d(scale_factor=2),
             nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1, padding_mode='replicate', bias=bias),
             nn.LayerNorm([out_channels, out_h, out_w]),
+            nn.SiLU(inplace=True))
+
+        self.apply(init_weights)
+
+    def forward(self, x):
+        return self.block(x)
+
+
+class ModernDecoderBatchNormConvBlock(nn.Module):
+    def __init__(self, out_channels, out_h, out_w, in_channels, bias=False):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.UpsamplingNearest2d(scale_factor=2),
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1, padding_mode='replicate', bias=bias),
+            nn.BatchNorm2d(out_channels),
             nn.SiLU(inplace=True))
 
         self.apply(init_weights)

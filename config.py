@@ -98,7 +98,7 @@ def make(model_size, action_size, action_classes, in_channels=3, decoder=None):
         decoder = Decoder(cnn_multi=cnn_multiplier,  h_size=gru_recurrent_units, out_channels=in_channels)
     embedder = Embedder(cnn_multi=cnn_multiplier, in_channels=in_channels)
 
-    preprocessor = PrePostProcessing()
+    preprocessor = PrePostProcessing(normalization=True)
     embedder = EmbedderPrepro(embedder, prepro=preprocessor.prepro)
     decoder = DecoderProcessed(decoder, prepro=preprocessor.prepro, postpro=preprocessor.postpro)
 

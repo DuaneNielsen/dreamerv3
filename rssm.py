@@ -30,17 +30,17 @@ from torch.distributions import Bernoulli, Categorical, Independent
 import symlog
 from dists import OneHotCategoricalStraightThru, categorical_kl_divergence, TwoHotSymlog, \
     OneHotCategoricalUnimix, ImageNormalDist, ImageMSEDist, ProcessedDist
-from blocks import MLPBlock, ModernDecoderConvBlock, DecoderConvBlock, init_weights, EncoderConvBlock
+from blocks import MLPBlock, ModernDecoderBatchNormConvBlock, DecoderConvBlock, init_weights, EncoderBatchNormConvBlock
 
 
 class Embedder(nn.Module):
     def __init__(self, in_channels=3, cnn_multi=32):
         super().__init__()
         self.embedder = nn.Sequential(
-            EncoderConvBlock(in_channels, 64, 64, cnn_multi),
-            EncoderConvBlock(cnn_multi * 2 ** 0, 32, 32, cnn_multi * 2 ** 1),
-            EncoderConvBlock(cnn_multi * 2 ** 1, 16, 16, cnn_multi * 2 ** 2),
-            EncoderConvBlock(cnn_multi * 2 ** 2, 8, 8, cnn_multi * 2 ** 3),
+            EncoderBatchNormConvBlock(in_channels, 64, 64, cnn_multi),
+            EncoderBatchNormConvBlock(cnn_multi * 2 ** 0, 32, 32, cnn_multi * 2 ** 1),
+            EncoderBatchNormConvBlock(cnn_multi * 2 ** 1, 16, 16, cnn_multi * 2 ** 2),
+            EncoderBatchNormConvBlock(cnn_multi * 2 ** 2, 8, 8, cnn_multi * 2 ** 3),
             nn.Flatten()
         )
 
@@ -136,10 +136,10 @@ class ModernDecoder(nn.Module):
         self.decoder = nn.Sequential(
             nn.Linear(z_cls * z_size + h_size, 4 * 4 * cnn_multi * 2 ** 3, bias=True),
             nn.Unflatten(-1, (cnn_multi * 2 ** 3, 4, 4)),
-            ModernDecoderConvBlock(cnn_multi * 2 ** 2, 8, 8, cnn_multi * 2 ** 3),
-            ModernDecoderConvBlock(cnn_multi * 2 ** 1, 16, 16, cnn_multi * 2 ** 2),
-            ModernDecoderConvBlock(cnn_multi * 2 ** 0, 32, 32, cnn_multi * 2 ** 1),
-            ModernDecoderConvBlock(out_channels, 64, 64, cnn_multi, bias=True),
+            ModernDecoderBatchNormConvBlock(cnn_multi * 2 ** 2, 8, 8, cnn_multi * 2 ** 3),
+            ModernDecoderBatchNormConvBlock(cnn_multi * 2 ** 1, 16, 16, cnn_multi * 2 ** 2),
+            ModernDecoderBatchNormConvBlock(cnn_multi * 2 ** 0, 32, 32, cnn_multi * 2 ** 1),
+            ModernDecoderBatchNormConvBlock(out_channels, 64, 64, cnn_multi, bias=True),
         )
         self.apply(init_weights)
 
